@@ -1,0 +1,219 @@
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="DashboardView"
+             Foreground="White">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="8">
+
+            <!-- ============================================================ -->
+            <!-- Storage Gauges Row                                            -->
+            <!-- ============================================================ -->
+            <TextBlock Text="Storage Overview"
+                       FontSize="16" FontWeight="Bold"
+                       Foreground="White"
+                       Margin="0,0,0,10"/>
+
+            <UniformGrid Columns="2" Margin="0,0,0,16">
+
+                <!-- C&C Node Storage Gauge -->
+                <Border Background="#2D2D44" CornerRadius="8"
+                        BorderBrush="#4A4A6A" BorderThickness="1"
+                        Padding="16" Margin="0,0,8,0">
+                    <StackPanel>
+                        <TextBlock Text="C&amp;C Local Storage"
+                                   FontSize="14" FontWeight="SemiBold"
+                                   Foreground="White" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="DashCCStorageLabel"
+                                       Grid.Column="0"
+                                       Text="-- GB used of -- GB"
+                                       Foreground="#B0B0CC" FontSize="12"/>
+                            <TextBlock x:Name="DashCCStoragePercent"
+                                       Grid.Column="1"
+                                       Text="--%"
+                                       Foreground="#B0B0CC" FontSize="12"
+                                       FontWeight="SemiBold"/>
+                        </Grid>
+
+                        <Border Background="#3A3A5C" CornerRadius="4" Height="12">
+                            <Border x:Name="DashCCStorageBar"
+                                    Background="#5B9BD5"
+                                    CornerRadius="4"
+                                    HorizontalAlignment="Left"
+                                    Width="0"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- NAS Storage Gauge -->
+                <Border Background="#2D2D44" CornerRadius="8"
+                        BorderBrush="#4A4A6A" BorderThickness="1"
+                        Padding="16" Margin="8,0,0,0">
+                    <StackPanel>
+                        <TextBlock Text="NAS / Network Storage"
+                                   FontSize="14" FontWeight="SemiBold"
+                                   Foreground="White" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="DashNASStorageLabel"
+                                       Grid.Column="0"
+                                       Text="Not configured"
+                                       Foreground="#B0B0CC" FontSize="12"/>
+                            <TextBlock x:Name="DashNASStoragePercent"
+                                       Grid.Column="1"
+                                       Text=""
+                                       Foreground="#B0B0CC" FontSize="12"
+                                       FontWeight="SemiBold"/>
+                        </Grid>
+
+                        <Border Background="#3A3A5C" CornerRadius="4" Height="12">
+                            <Border x:Name="DashNASStorageBar"
+                                    Background="#5B9BD5"
+                                    CornerRadius="4"
+                                    HorizontalAlignment="Left"
+                                    Width="0"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+            </UniformGrid>
+
+            <!-- ============================================================ -->
+            <!-- Instance Status Cards                                         -->
+            <!-- ============================================================ -->
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="Server Instances"
+                           Grid.Column="0"
+                           FontSize="16" FontWeight="Bold"
+                           Foreground="White"
+                           VerticalAlignment="Center"/>
+
+                <Button x:Name="DashRefreshButton"
+                        Grid.Column="1"
+                        Content="Refresh"
+                        Background="#3A3A5C"
+                        Padding="12,6"
+                        FontSize="12"/>
+            </Grid>
+
+            <!-- No Instances Placeholder -->
+            <Border x:Name="DashNoInstancesPanel"
+                    Background="#2D2D44" CornerRadius="8"
+                    BorderBrush="#4A4A6A" BorderThickness="1"
+                    Padding="40" Margin="0,0,0,8"
+                    Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="No server instances discovered"
+                               FontSize="16" Foreground="#B0B0CC"
+                               HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                    <TextBlock Text="Configure nodes in the Settings tab to get started."
+                               FontSize="12" Foreground="#808099"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Instance Cards WrapPanel -->
+            <ItemsControl x:Name="DashInstanceCards">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Background="#2D2D44" CornerRadius="8"
+                                BorderBrush="#4A4A6A" BorderThickness="1"
+                                Padding="16" Margin="0,0,12,12"
+                                Width="280" MinHeight="180">
+                            <StackPanel>
+                                <!-- Header: status dot + instance name -->
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Ellipse Width="12" Height="12"
+                                             Fill="{Binding StatusColor}"
+                                             VerticalAlignment="Center"
+                                             Margin="0,0,8,0"/>
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               FontSize="15" FontWeight="Bold"
+                                               Foreground="White"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
+
+                                <!-- Node name -->
+                                <TextBlock Foreground="#808099" FontSize="11"
+                                           Margin="0,0,0,8">
+                                    <Run Text="Node: "/><Run Text="{Binding NodeName}"/>
+                                </TextBlock>
+
+                                <!-- Detail rows -->
+                                <Grid Margin="0,0,0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Text="Last backup:"
+                                               Grid.Row="0" Grid.Column="0"
+                                               Foreground="#B0B0CC" FontSize="12"
+                                               Margin="0,0,12,4"/>
+                                    <TextBlock Text="{Binding LastBackup}"
+                                               Grid.Row="0" Grid.Column="1"
+                                               Foreground="White" FontSize="12"
+                                               Margin="0,0,0,4"/>
+
+                                    <TextBlock Text="Next backup:"
+                                               Grid.Row="1" Grid.Column="0"
+                                               Foreground="#B0B0CC" FontSize="12"
+                                               Margin="0,0,12,4"/>
+                                    <TextBlock Text="{Binding NextBackup}"
+                                               Grid.Row="1" Grid.Column="1"
+                                               Foreground="White" FontSize="12"
+                                               Margin="0,0,0,4"/>
+
+                                    <TextBlock Text="Players:"
+                                               Grid.Row="2" Grid.Column="0"
+                                               Foreground="#B0B0CC" FontSize="12"
+                                               Margin="0,0,12,4"/>
+                                    <TextBlock Text="{Binding PlayerCount}"
+                                               Grid.Row="2" Grid.Column="1"
+                                               Foreground="White" FontSize="12"
+                                               Margin="0,0,0,4"/>
+                                </Grid>
+
+                                <!-- Backup Now button -->
+                                <Button Content="Backup Now"
+                                        Tag="{Binding InstanceName}"
+                                        x:Name="DashCardBackupButton"
+                                        Background="#5B9BD5"
+                                        Padding="12,6"
+                                        FontSize="12"
+                                        HorizontalAlignment="Right"
+                                        Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

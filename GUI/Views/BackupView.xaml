@@ -1,0 +1,186 @@
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="BackupView"
+             Foreground="White">
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ============================================================ -->
+        <!-- Top: Instance selector and action buttons                     -->
+        <!-- ============================================================ -->
+        <Border Grid.Row="0" Background="#2D2D44" CornerRadius="8"
+                BorderBrush="#4A4A6A" BorderThickness="1"
+                Padding="16" Margin="0,0,0,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="250"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="Instance:"
+                           Grid.Column="0"
+                           Foreground="#B0B0CC" FontSize="13"
+                           VerticalAlignment="Center"
+                           Margin="0,0,10,0"/>
+
+                <ComboBox x:Name="BackupInstanceCombo"
+                          Grid.Column="1"
+                          VerticalAlignment="Center"/>
+
+                <!-- Spacer -->
+                <Border Grid.Column="2"/>
+
+                <Button x:Name="BackupNowButton"
+                        Grid.Column="3"
+                        Content="Backup Now"
+                        Background="#5B9BD5"
+                        Margin="0,0,8,0"/>
+
+                <Button x:Name="BackupForceFullButton"
+                        Grid.Column="4"
+                        Content="Force Full"
+                        Background="#3A3A5C"
+                        Margin="0,0,8,0"/>
+
+                <Button x:Name="BackupVerifyAllButton"
+                        Grid.Column="5"
+                        Content="Verify All"
+                        Background="#3A3A5C"/>
+            </Grid>
+        </Border>
+
+        <!-- ============================================================ -->
+        <!-- Middle: Backup History DataGrid                               -->
+        <!-- ============================================================ -->
+        <Border Grid.Row="1" Background="#2D2D44" CornerRadius="8"
+                BorderBrush="#4A4A6A" BorderThickness="1"
+                Padding="2" Margin="0,0,0,12">
+            <DataGrid x:Name="BackupHistoryGrid"
+                      SelectionChanged="BackupHistoryGrid_SelectionChanged">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Timestamp" Binding="{Binding Timestamp}"
+                                        Width="180"/>
+                    <DataGridTextColumn Header="Type" Binding="{Binding Type}"
+                                        Width="100"/>
+                    <DataGridTextColumn Header="Size" Binding="{Binding Size}"
+                                        Width="100"/>
+                    <DataGridTextColumn Header="Files" Binding="{Binding FileCount}"
+                                        Width="80"/>
+                    <DataGridTextColumn Header="Chain #" Binding="{Binding ChainSequence}"
+                                        Width="80"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}"
+                                        Width="*"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <!-- ============================================================ -->
+        <!-- Diff Viewer Panel                                             -->
+        <!-- ============================================================ -->
+        <Border Grid.Row="2" Background="#2D2D44" CornerRadius="8"
+                BorderBrush="#4A4A6A" BorderThickness="1"
+                Padding="16" Margin="0,0,0,12"
+                x:Name="BackupDiffPanel"
+                Visibility="Collapsed">
+            <StackPanel>
+                <TextBlock Text="Incremental Diff Details"
+                           FontSize="14" FontWeight="SemiBold"
+                           Foreground="White" Margin="0,0,0,10"/>
+
+                <!-- Summary counts -->
+                <UniformGrid Columns="3" Margin="0,0,0,10">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="10" Height="10" Fill="#6BCB77"
+                                 VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="BackupDiffAdded"
+                                   Text="0 added" Foreground="White" FontSize="12"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="10" Height="10" Fill="#FFD93D"
+                                 VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="BackupDiffModified"
+                                   Text="0 modified" Foreground="White" FontSize="12"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="10" Height="10" Fill="#FF6B6B"
+                                 VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="BackupDiffDeleted"
+                                   Text="0 deleted" Foreground="White" FontSize="12"/>
+                    </StackPanel>
+                </UniformGrid>
+
+                <!-- Expandable file list -->
+                <Expander Header="Changed Files" Foreground="White"
+                          IsExpanded="False" Margin="0,0,0,4">
+                    <Expander.HeaderTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" Foreground="White"
+                                       FontSize="12" FontWeight="SemiBold"/>
+                        </DataTemplate>
+                    </Expander.HeaderTemplate>
+                    <ListView x:Name="BackupDiffFileList"
+                              MaxHeight="200"
+                              Background="#363654"
+                              BorderThickness="0">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Change" Width="80"
+                                                DisplayMemberBinding="{Binding ChangeType}"/>
+                                <GridViewColumn Header="File Path" Width="500"
+                                                DisplayMemberBinding="{Binding FilePath}"/>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                </Expander>
+            </StackPanel>
+        </Border>
+
+        <!-- ============================================================ -->
+        <!-- Disk Usage Summary Bar                                        -->
+        <!-- ============================================================ -->
+        <Border Grid.Row="3" Background="#2D2D44" CornerRadius="8"
+                BorderBrush="#4A4A6A" BorderThickness="1"
+                Padding="16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="Disk Usage:"
+                           Grid.Column="0"
+                           Foreground="#B0B0CC" FontSize="12"
+                           VerticalAlignment="Center"
+                           Margin="0,0,12,0"/>
+
+                <Border Grid.Column="1" Background="#3A3A5C" CornerRadius="4" Height="12"
+                        VerticalAlignment="Center">
+                    <Border x:Name="BackupDiskUsageBar"
+                            Background="#5B9BD5"
+                            CornerRadius="4"
+                            HorizontalAlignment="Left"
+                            Width="0"/>
+                </Border>
+
+                <TextBlock x:Name="BackupDiskUsageLabel"
+                           Grid.Column="2"
+                           Text="-- GB"
+                           Foreground="#B0B0CC" FontSize="12"
+                           VerticalAlignment="Center"
+                           Margin="12,0,0,0"/>
+            </Grid>
+        </Border>
+
+    </Grid>
+</UserControl>
