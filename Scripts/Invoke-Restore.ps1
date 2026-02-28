@@ -1,0 +1,484 @@
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    CLI entry point for the SEBackup restore operation.
+
+.DESCRIPTION
+    Restores a Space Engineers Torch server world save from a backup archive.
+    Supports listing available restore points, selecting a specific restore
+    point, and performing the restore with safety backup and confirmation.
+
+    This script handles the interactive workflow and delegates to the
+    RestoreEngine module for the actual restore operation.
+
+.PARAMETER NodeName
+    The name of the node where the instance to restore is located.
+
+.PARAMETER InstanceName
+    The name of the instance to restore.
+
+.PARAMETER RestorePoint
+    The identifier of a specific restore point to use (e.g., a backup manifest
+    filename or timestamp). If not provided, the script lists available restore
+    points and prompts for selection.
+
+.PARAMETER ListPoints
+    When specified, displays available restore points in a formatted table
+    and exits without performing a restore.
+
+.PARAMETER SkipSafetyBackup
+    When specified, skips the pre-restore safety backup. By default, a safety
+    backup is taken before any restore to allow recovery if something goes wrong.
+
+.PARAMETER Force
+    Suppresses the confirmation prompt before performing the restore.
+
+.EXAMPLE
+    .\Invoke-Restore.ps1 -NodeName "GameServer01" -InstanceName "PvPArena" -ListPoints
+    # Lists all available restore points for the PvPArena instance.
+
+.EXAMPLE
+    .\Invoke-Restore.ps1 -NodeName "GameServer01" -InstanceName "PvPArena"
+    # Shows restore points, prompts for selection, then restores.
+
+.EXAMPLE
+    .\Invoke-Restore.ps1 -NodeName "GameServer01" -InstanceName "PvPArena" -RestorePoint "2025-01-15_020000_full"
+    # Restores from a specific restore point.
+
+.EXAMPLE
+    .\Invoke-Restore.ps1 -NodeName "GameServer01" -InstanceName "Survival" -Force -SkipSafetyBackup
+    # Restores without confirmation or safety backup (use with caution).
+
+.OUTPUTS
+    None. Progress and results are displayed interactively.
+#>
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+param(
+    [Parameter(Mandatory, Position = 0)]
+    [ValidateNotNullOrEmpty()]
+    [string]$NodeName,
+
+    [Parameter(Mandatory, Position = 1)]
+    [ValidateNotNullOrEmpty()]
+    [string]$InstanceName,
+
+    [Parameter()]
+    [string]$RestorePoint,
+
+    [Parameter()]
+    [switch]$ListPoints,
+
+    [Parameter()]
+    [switch]$SkipSafetyBackup,
+
+    [Parameter()]
+    [switch]$Force
+)
+
+# ── Import SEBackup modules ──────────────────────────────────────────────────
+$projectRoot = Split-Path -Path $PSScriptRoot -Parent
+$modulesRoot = Join-Path $projectRoot 'Modules'
+
+$moduleNames = @(
+    'Logger'
+    'ConfigManager'
+    'CredentialManager'
+    'RemoteManager'
+    'VRageAPI'
+    'VSSManager'
+    'ManifestManager'
+    'IntegrityManager'
+    'CompressionManager'
+    'LoadMonitor'
+    'NetworkThrottle'
+    'NotificationManager'
+    'MetricsCollector'
+    'BackupEngine'
+    'RestoreEngine'
+)
+
+foreach ($mod in $moduleNames) {
+    $modPath = Join-Path $modulesRoot "$mod\$mod.psm1"
+    if (Test-Path $modPath) {
+        Import-Module $modPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+Write-Host ''
+Write-Host '╔══════════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
+Write-Host '║                   SEBackup - Restore                        ║' -ForegroundColor Cyan
+Write-Host '╚══════════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
+Write-Host ''
+Write-Host "  Node     : $NodeName" -ForegroundColor White
+Write-Host "  Instance : $InstanceName" -ForegroundColor White
+Write-Host ''
+
+# ── Load configuration ───────────────────────────────────────────────────────
+Write-Host 'Loading configuration...' -ForegroundColor Yellow
+
+$nodeConfig = $null
+$globalConfig = $null
+
+try {
+    $nodeConfig = Get-SEBNodeConfig -NodeName $NodeName
+    if (-not $nodeConfig) {
+        throw "Node config not found for '$NodeName'."
+    }
+    $globalConfig = Get-SEBGlobalConfig
+}
+catch {
+    Write-Host "  ERROR: $_" -ForegroundColor Red
+    Write-Host '  Verify the node is configured with Setup-Node.ps1.' -ForegroundColor DarkYellow
+    return
+}
+
+$hostname = $nodeConfig.node.hostname
+$backupRoot = $globalConfig.storage.cc_backup_root
+$instanceBackupDir = Join-Path $backupRoot "$NodeName\$InstanceName"
+
+# ── Discover available restore points ────────────────────────────────────────
+Write-Host 'Discovering available restore points...' -ForegroundColor Yellow
+Write-Host ''
+
+$restorePoints = [System.Collections.Generic.List[object]]::new()
+
+try {
+    # Look for manifest files in the backup directory
+    if (Test-Path $instanceBackupDir) {
+        $manifestFiles = Get-ChildItem -Path $instanceBackupDir -Filter '*.manifest.json' -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property LastWriteTime -Descending
+
+        if ($manifestFiles -and $manifestFiles.Count -gt 0) {
+            $index = 0
+            foreach ($mf in $manifestFiles) {
+                $index++
+                $manifestData = $null
+
+                # Try to read and parse manifest
+                try {
+                    if (Get-Command -Name 'Read-SEBManifest' -ErrorAction SilentlyContinue) {
+                        $manifestData = Read-SEBManifest -Path $mf.FullName
+                    }
+                    else {
+                        $manifestData = Get-Content -Path $mf.FullName -Raw | ConvertFrom-Json
+                    }
+                }
+                catch {
+                    Write-Verbose "Could not parse manifest $($mf.Name): $_"
+                }
+
+                $backupType = 'Unknown'
+                $fileCount = 0
+                $sizeBytes = 0
+                $timestamp = $mf.LastWriteTime
+
+                if ($manifestData) {
+                    if ($manifestData.backup_type) { $backupType = $manifestData.backup_type }
+                    if ($manifestData.BackupType) { $backupType = $manifestData.BackupType }
+                    if ($manifestData.file_count) { $fileCount = $manifestData.file_count }
+                    if ($manifestData.FileCount) { $fileCount = $manifestData.FileCount }
+                    if ($manifestData.total_size_bytes) { $sizeBytes = $manifestData.total_size_bytes }
+                    if ($manifestData.TotalSizeBytes) { $sizeBytes = $manifestData.TotalSizeBytes }
+                    if ($manifestData.timestamp) { $timestamp = [datetime]$manifestData.timestamp }
+                    if ($manifestData.Timestamp) { $timestamp = [datetime]$manifestData.Timestamp }
+                }
+
+                $sizeMB = [math]::Round($sizeBytes / 1MB, 2)
+                $pointId = $mf.BaseName -replace '\.manifest$', ''
+
+                $restorePoints.Add([PSCustomObject]@{
+                    Index        = $index
+                    PointId      = $pointId
+                    Date         = $timestamp.ToString('yyyy-MM-dd HH:mm:ss')
+                    Type         = $backupType
+                    Files        = $fileCount
+                    SizeMB       = $sizeMB
+                    ManifestPath = $mf.FullName
+                })
+            }
+        }
+    }
+
+    # Also check for archive files without manifests
+    if (Test-Path $instanceBackupDir) {
+        $archiveFiles = Get-ChildItem -Path $instanceBackupDir -Include '*.7z', '*.zip' -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
+            Sort-Object -Property LastWriteTime -Descending
+
+        foreach ($af in $archiveFiles) {
+            $restorePoints.Add([PSCustomObject]@{
+                Index        = $restorePoints.Count + 1
+                PointId      = $af.BaseName
+                Date         = $af.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+                Type         = 'Archive'
+                Files        = 0
+                SizeMB       = [math]::Round($af.Length / 1MB, 2)
+                ManifestPath = $af.FullName
+            })
+        }
+    }
+}
+catch {
+    Write-Host "  ERROR discovering restore points: $_" -ForegroundColor Red
+}
+
+if ($restorePoints.Count -eq 0) {
+    Write-Host '  No restore points found.' -ForegroundColor Red
+    Write-Host "  Backup directory: $instanceBackupDir" -ForegroundColor DarkGray
+    Write-Host ''
+    return
+}
+
+# ── Display restore points ───────────────────────────────────────────────────
+Write-Host "  Found $($restorePoints.Count) restore point(s):" -ForegroundColor White
+Write-Host ''
+
+$formatTable = @(
+    @{ Label = '#';      Width = 4;  Property = 'Index' }
+    @{ Label = 'Date';   Width = 20; Property = 'Date' }
+    @{ Label = 'Type';   Width = 14; Property = 'Type' }
+    @{ Label = 'Files';  Width = 7;  Property = 'Files' }
+    @{ Label = 'Size MB'; Width = 10; Property = 'SizeMB' }
+    @{ Label = 'Restore Point ID'; Width = 40; Property = 'PointId' }
+)
+
+# Header
+$header = '  '
+$separator = '  '
+foreach ($col in $formatTable) {
+    $header += $col.Label.PadRight($col.Width) + '  '
+    $separator += ('-' * $col.Width) + '  '
+}
+Write-Host $header -ForegroundColor Cyan
+Write-Host $separator -ForegroundColor DarkGray
+
+# Rows
+foreach ($rp in $restorePoints) {
+    $row = '  '
+    foreach ($col in $formatTable) {
+        $val = $rp.($col.Property)
+        $row += "$val".PadRight($col.Width) + '  '
+    }
+    Write-Host $row -ForegroundColor White
+}
+
+Write-Host ''
+
+# ── If -ListPoints, exit here ─────────────────────────────────────────────────
+if ($ListPoints) {
+    return
+}
+
+# ── Select restore point ─────────────────────────────────────────────────────
+$selectedPoint = $null
+
+if ($RestorePoint) {
+    # Match by PointId
+    $selectedPoint = $restorePoints | Where-Object { $_.PointId -eq $RestorePoint } | Select-Object -First 1
+    if (-not $selectedPoint) {
+        # Try partial match
+        $selectedPoint = $restorePoints | Where-Object { $_.PointId -like "*$RestorePoint*" } | Select-Object -First 1
+    }
+    if (-not $selectedPoint) {
+        Write-Host "  ERROR: Restore point '$RestorePoint' not found." -ForegroundColor Red
+        return
+    }
+    Write-Host "  Selected: $($selectedPoint.PointId) ($($selectedPoint.Date))" -ForegroundColor Green
+}
+else {
+    # Prompt for selection
+    do {
+        $selection = Read-Host '  Select a restore point (enter number, or q to quit)'
+        if ($selection -eq 'q' -or $selection -eq 'Q') {
+            Write-Host '  Restore cancelled.' -ForegroundColor DarkYellow
+            return
+        }
+        $selectionInt = 0
+        $valid = [int]::TryParse($selection, [ref]$selectionInt)
+    } while (-not $valid -or $selectionInt -lt 1 -or $selectionInt -gt $restorePoints.Count)
+
+    $selectedPoint = $restorePoints | Where-Object { $_.Index -eq $selectionInt } | Select-Object -First 1
+    Write-Host "  Selected: $($selectedPoint.PointId) ($($selectedPoint.Date))" -ForegroundColor Green
+}
+
+Write-Host ''
+
+# ── Confirmation ──────────────────────────────────────────────────────────────
+if (-not $Force) {
+    Write-Host '  WARNING: This will overwrite the current world save!' -ForegroundColor Red
+    Write-Host "  Restore point : $($selectedPoint.PointId)" -ForegroundColor White
+    Write-Host "  Date          : $($selectedPoint.Date)" -ForegroundColor White
+    Write-Host "  Type          : $($selectedPoint.Type)" -ForegroundColor White
+    Write-Host ''
+
+    if (-not $PSCmdlet.ShouldProcess("Restore $InstanceName on $NodeName from $($selectedPoint.PointId)", 'Restore world save')) {
+        Write-Host '  Restore cancelled.' -ForegroundColor DarkYellow
+        return
+    }
+
+    $confirm = Read-Host '  Type "RESTORE" to confirm'
+    if ($confirm -ne 'RESTORE') {
+        Write-Host '  Restore cancelled.' -ForegroundColor DarkYellow
+        return
+    }
+}
+
+# ── Initialize logging ───────────────────────────────────────────────────────
+$logContext = $null
+if (Get-Command -Name 'Start-SEBLogContext' -ErrorAction SilentlyContinue) {
+    try {
+        $logContext = Start-SEBLogContext -Operation 'Restore'
+    }
+    catch {
+        Write-Verbose "Could not start log context: $_"
+    }
+}
+
+$startTime = Get-Date
+$restoreSuccess = $false
+
+try {
+    # ── Step 1: Safety backup ─────────────────────────────────────────────
+    if (-not $SkipSafetyBackup) {
+        Write-Host '[1/4] Creating safety backup of current world...' -ForegroundColor Yellow
+        try {
+            if (Get-Command -Name 'Invoke-SEBBackup' -ErrorAction SilentlyContinue) {
+                $safetyResult = Invoke-SEBBackup `
+                    -NodeName $NodeName `
+                    -InstanceName $InstanceName `
+                    -ForceFull `
+                    -SkipLoadCheck `
+                    -SkipNotify
+
+                if ($safetyResult -and $safetyResult.Success) {
+                    Write-Host '  [PASS] Safety backup created.' -ForegroundColor Green
+                }
+                else {
+                    Write-Host '  [WARN] Safety backup may have failed. Proceeding with restore.' -ForegroundColor DarkYellow
+                }
+            }
+            else {
+                Write-Host '  [SKIP] BackupEngine not available. No safety backup taken.' -ForegroundColor DarkYellow
+            }
+        }
+        catch {
+            Write-Host "  [WARN] Safety backup error: $_" -ForegroundColor DarkYellow
+            Write-Host '         Proceeding with restore anyway.' -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Host '[1/4] Skipping safety backup (-SkipSafetyBackup specified).' -ForegroundColor DarkGray
+    }
+
+    # ── Step 2: Connect to node ───────────────────────────────────────────
+    Write-Host '[2/4] Connecting to node...' -ForegroundColor Yellow
+    $session = $null
+    try {
+        $session = New-SEBSession -NodeName $NodeName -NodeConfig $nodeConfig.node
+        Write-Host "  [PASS] Connected to $hostname." -ForegroundColor Green
+    }
+    catch {
+        throw "Cannot connect to node '$NodeName': $_"
+    }
+
+    # ── Step 3: Perform restore ───────────────────────────────────────────
+    Write-Host '[3/4] Restoring world save...' -ForegroundColor Yellow
+    Write-Host "  Source: $($selectedPoint.ManifestPath)" -ForegroundColor DarkGray
+
+    if (Get-Command -Name 'Invoke-SEBRestore' -ErrorAction SilentlyContinue) {
+        $restoreResult = Invoke-SEBRestore `
+            -NodeName $NodeName `
+            -InstanceName $InstanceName `
+            -RestorePoint $selectedPoint.PointId `
+            -ManifestPath $selectedPoint.ManifestPath
+
+        if ($restoreResult -and $restoreResult.Success) {
+            $restoreSuccess = $true
+            Write-Host '  [PASS] World save restored successfully.' -ForegroundColor Green
+        }
+        else {
+            $errorMsg = if ($restoreResult -and $restoreResult.Error) { $restoreResult.Error } else { 'Unknown error' }
+            throw "Restore operation failed: $errorMsg"
+        }
+    }
+    else {
+        Write-Host '  [ERROR] RestoreEngine module is not loaded.' -ForegroundColor Red
+        Write-Host '          Invoke-SEBRestore function is not available.' -ForegroundColor DarkYellow
+        throw 'RestoreEngine module not available.'
+    }
+
+    # ── Step 4: Verify restore ────────────────────────────────────────────
+    Write-Host '[4/4] Verifying restore...' -ForegroundColor Yellow
+    try {
+        $instanceConfig = Get-SEBInstanceConfig -Session $session -InstanceName $InstanceName
+        $worldPath = $instanceConfig.paths.world_save
+
+        $verifyResult = Invoke-Command -Session $session -ScriptBlock {
+            param($WorldPath)
+
+            $sandboxFile = Join-Path $WorldPath 'Sandbox.sbc'
+            $lastSaveFile = Join-Path $WorldPath 'Sandbox_config.sbc'
+
+            return @{
+                WorldExists     = (Test-Path $WorldPath -PathType Container)
+                SandboxExists   = (Test-Path $sandboxFile)
+                LastModified    = if (Test-Path $WorldPath) { (Get-Item $WorldPath).LastWriteTime } else { $null }
+            }
+        } -ArgumentList $worldPath -ErrorAction Stop
+
+        if ($verifyResult.WorldExists -and $verifyResult.SandboxExists) {
+            Write-Host "  [PASS] World save verified (Last modified: $($verifyResult.LastModified))." -ForegroundColor Green
+        }
+        elseif ($verifyResult.WorldExists) {
+            Write-Host '  [WARN] World directory exists but Sandbox.sbc not found.' -ForegroundColor DarkYellow
+        }
+        else {
+            Write-Host '  [WARN] Could not verify restored world.' -ForegroundColor DarkYellow
+        }
+    }
+    catch {
+        Write-Host "  [WARN] Verification check failed: $_" -ForegroundColor DarkYellow
+    }
+}
+catch {
+    Write-Host ''
+    Write-Host "  RESTORE FAILED: $_" -ForegroundColor Red
+}
+finally {
+    # Clean up session
+    Remove-SEBSession -NodeName $NodeName -ErrorAction SilentlyContinue
+
+    if ($logContext -and (Get-Command -Name 'Stop-SEBLogContext' -ErrorAction SilentlyContinue)) {
+        try { Stop-SEBLogContext } catch {}
+    }
+}
+
+# ── Results ───────────────────────────────────────────────────────────────────
+$endTime = Get-Date
+$duration = $endTime - $startTime
+
+Write-Host ''
+Write-Host '╔══════════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
+Write-Host '║                    Restore Results                          ║' -ForegroundColor Cyan
+Write-Host '╠══════════════════════════════════════════════════════════════╣' -ForegroundColor Cyan
+
+if ($restoreSuccess) {
+    Write-Host '║  Status  : SUCCESS                                         ║' -ForegroundColor Green
+}
+else {
+    Write-Host '║  Status  : FAILED                                          ║' -ForegroundColor Red
+}
+
+Write-Host "║  Node    : $($NodeName.PadRight(48))║" -ForegroundColor White
+Write-Host "║  Instance: $($InstanceName.PadRight(48))║" -ForegroundColor White
+Write-Host "║  Point   : $($selectedPoint.PointId.PadRight(48))║" -ForegroundColor White
+Write-Host "║  Duration: $($duration.ToString('hh\:mm\:ss').PadRight(48))║" -ForegroundColor White
+Write-Host '╚══════════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
+
+if ($restoreSuccess) {
+    Write-Host ''
+    Write-Host '  Restore complete. Start the Torch server to use the restored world.' -ForegroundColor Green
+}
+
+Write-Host ''

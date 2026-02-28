@@ -416,3 +416,25 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# =============================================================================
+# SEBackup Project-Specific
+# =============================================================================
+
+# DPAPI-encrypted credential files (machine+user bound, contain secrets)
+Credentials/*.cred.xml
+
+# Runtime data directories
+Data/backups/
+Data/lockfiles/*.lock
+Data/metrics/
+
+# Log files (daily rotating)
+Logs/
+
+# Backup archives (never commit these)
+*.7z
+*.zip
+
+# Pester test results
+testResults.xml
