@@ -1,0 +1,43 @@
+# =============================================================================
+# SEBackup Node Configuration - Example
+# =============================================================================
+#
+# Each compute node that hosts Space Engineers / Torch instances needs a
+# configuration file in the Config/nodes/ directory. The filename (without
+# .toml extension) becomes the node identifier used throughout SEBackup.
+#
+# Example: Config/nodes/gamingpc01.toml
+#
+# The C&C server uses this information to establish PSRemoting sessions to
+# the node for backup operations.
+#
+# Credentials are stored separately in Credentials/{nodename}.cred.xml
+# using DPAPI encryption (Export-Clixml). They are NOT stored in this file.
+# =============================================================================
+
+
+[node]
+
+# Human-friendly display name for this node.
+# Used in logs, notifications, and the GUI. Does not need to be unique
+# but should be descriptive enough to identify the machine.
+display_name = "Gaming PC 01"
+
+# Hostname or IP address of the compute node.
+# Used to establish PowerShell remoting (PSSession) connections.
+# Can be an IP address (e.g., "192.168.1.101"), a DNS hostname
+# (e.g., "gamingpc01.local"), or a FQDN.
+# The node must have WinRM/PSRemoting enabled and configured.
+hostname = "192.168.1.101"
+
+# Username for the PSRemoting connection.
+# This account must have:
+#   - Administrator privileges on the compute node (for VSS operations)
+#   - Read access to the Torch server directories
+#   - Permission to run PowerShell remoting commands
+# The password is stored in the encrypted credential file, not here.
+username = "SEBackup"
+
+# Credential stored in Credentials/{nodename}.cred.xml (DPAPI encrypted)
+# Create it with:
+#   Get-Credential | Export-Clixml -Path "Credentials/gamingpc01.cred.xml"

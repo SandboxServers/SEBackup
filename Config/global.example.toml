@@ -1,0 +1,220 @@
+# =============================================================================
+# SEBackup Global Configuration - Example / Reference
+# =============================================================================
+#
+# This file documents all available settings for the SEBackup system.
+# Copy this file to 'global.toml' and customize to your environment.
+#
+# TOML format reference: https://toml.io/
+# All Windows paths must use double backslashes: "C:\\Path\\To\\Folder"
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# [storage] - Backup storage locations
+# -----------------------------------------------------------------------------
+# Controls where backups are stored on the C&C server and optional NAS.
+#
+[storage]
+
+# Local path on the C&C server where backups are staged after transfer from
+# compute nodes. Each node and instance gets a subdirectory under this root.
+# Must be an absolute Windows path with sufficient free space.
+cc_backup_root = "C:\\SEBackup\\Backups"
+
+# Optional UNC path or mapped drive for long-term NAS/network storage.
+# Backups are copied here after landing on the C&C server.
+# Leave empty ("") to disable NAS offloading entirely.
+# Examples: "\\\\NAS01\\Backups\\SpaceEngineers", "Z:\\SEBackups"
+nas_backup_path = ""
+
+
+# -----------------------------------------------------------------------------
+# [retention] - Backup retention policy
+# -----------------------------------------------------------------------------
+# Controls how many backups are kept and for how long. Older backups beyond
+# these limits are automatically pruned.
+#
+[retention]
+
+# Number of full backup sets to retain on the C&C server.
+# A "set" is one full backup plus its incremental chain.
+# Minimum: 1 (always keep at least one full). Recommended: 2-3.
+cc_full_count = 2
+
+# Number of days to retain backups on the NAS before automatic cleanup.
+# Only applies when nas_backup_path is configured.
+# Set to 0 to disable NAS retention cleanup (keep forever).
+nas_retention_days = 90
+
+
+# -----------------------------------------------------------------------------
+# [schedule] - Backup scheduling
+# -----------------------------------------------------------------------------
+# Controls when and how often backups run automatically.
+#
+[schedule]
+
+# Master switch for the backup scheduler.
+# Set to false to disable all automatic backups (manual only).
+enabled = true
+
+# Hours between incremental backup runs.
+# Lower = more frequent backups but more I/O load.
+# Recommended: 4-8 for active servers, 12-24 for low-activity servers.
+interval_hours = 6
+
+# Hours between forced full backups.
+# 168 = weekly. Full backups capture everything regardless of changes.
+# Must be a multiple of interval_hours for clean scheduling.
+full_backup_interval_hours = 168
+
+# Maximum number of incremental backups in a chain before forcing a full.
+# Longer chains = more efficient storage but slower restores.
+# If this limit is hit before full_backup_interval_hours, a full backup is
+# triggered early. Set high (e.g. 100) to rely solely on the time interval.
+max_incremental_chain_length = 48
+
+# Preferred start time for the first backup of the day (24-hour format).
+# The scheduler will attempt to align backup runs near this time.
+# Format: "HH:mm"
+start_time = "02:00"
+
+
+# -----------------------------------------------------------------------------
+# [compression] - Backup compression settings
+# -----------------------------------------------------------------------------
+# Controls how backup archives are compressed.
+#
+[compression]
+
+# Compression engine to use.
+# "auto"   - Use 7zip if available, fall back to .NET (System.IO.Compression)
+# "7zip"   - Force 7-Zip (must be installed on compute nodes)
+# "dotnet" - Force .NET built-in compression (no external dependencies)
+engine = "auto"
+
+# 7-Zip compression level (1-9).
+# 1 = fastest (least compression), 9 = best compression (slowest).
+# 5 is a balanced default. Use 1-3 for speed-sensitive servers.
+# Only applies when engine is "auto" or "7zip".
+level_7zip = 5
+
+
+# -----------------------------------------------------------------------------
+# [network] - Network transfer settings
+# -----------------------------------------------------------------------------
+# Controls bandwidth usage when transferring backups from nodes to C&C.
+#
+[network]
+
+# Maximum bandwidth for backup transfers in megabits per second.
+# Set to 0 for unlimited. Useful to prevent backup transfers from
+# saturating the network and affecting game server performance.
+max_bandwidth_mbps = 100
+
+# Robocopy inter-packet gap in milliseconds.
+# Higher values = slower but gentler transfers.
+# 0 = no throttling. 10-50 = light throttling. 100+ = heavy throttling.
+# Only applies to Windows-to-Windows robocopy transfers.
+robocopy_ipg_ms = 0
+
+
+# -----------------------------------------------------------------------------
+# [load_awareness] - Server load monitoring
+# -----------------------------------------------------------------------------
+# When enabled, backup operations check server health before proceeding.
+# If the server is under heavy load, backups are delayed until conditions
+# improve. This prevents backups from impacting game performance.
+#
+[load_awareness]
+
+# Enable or disable load-aware backup scheduling.
+# When false, backups proceed regardless of server load.
+enabled = true
+
+# Maximum CPU usage (%) on the compute node before deferring backups.
+# Measured as an average over check_interval_seconds.
+max_cpu_percent = 80
+
+# Maximum memory usage (%) before deferring backups.
+max_memory_percent = 85
+
+# Minimum sim speed (0.0 to 1.0) required before proceeding with backup.
+# 1.0 = full speed, 0.5 = half speed. Below this threshold, the server
+# is considered too loaded for backup operations.
+# Obtained via the VRage Remote API.
+sim_speed_threshold = 0.8
+
+# Seconds between load checks when waiting for conditions to improve.
+check_interval_seconds = 30
+
+# Multiplier for exponential backoff when repeated checks fail.
+# Each consecutive failed check multiplies the wait time by this factor.
+backoff_multiplier = 2.0
+
+# Maximum minutes to wait in backoff before giving up and either
+# proceeding anyway or skipping the backup.
+max_backoff_minutes = 60
+
+
+# -----------------------------------------------------------------------------
+# [notifications] - Alert and notification settings
+# -----------------------------------------------------------------------------
+# Configure how and when the system sends notifications about backup events.
+#
+[notifications]
+
+# Master switch for notifications. Set to false to silence all alerts.
+enabled = false
+
+# Send a notification when a backup completes successfully.
+# Can be noisy for frequent schedules; consider leaving this false.
+on_success = false
+
+# Send a notification when a backup fails.
+# Strongly recommended to keep this true.
+on_failure = true
+
+# Send a notification for non-fatal warnings (e.g., high load delays).
+on_warning = true
+
+# Webhook URL for sending notifications.
+# For Discord: use a Discord webhook URL.
+# For other methods: consult the notification method's documentation.
+webhook_url = ""
+
+# Notification delivery method.
+# "discord" - Discord webhook (JSON payload)
+# Additional methods may be added in future versions.
+method = "discord"
+
+
+# -----------------------------------------------------------------------------
+# [defaults.vrage_api] - Default VRage Remote API settings
+# -----------------------------------------------------------------------------
+# These values are used as defaults for all instances unless overridden in
+# the instance-level TOML configuration.
+#
+[defaults.vrage_api]
+
+# Default TCP port for the VRage Remote API.
+# Each instance can override this in its own config.
+port = 8080
+
+# Seconds to wait for a world save to complete via the VRage API before
+# timing out. Increase for very large worlds.
+save_timeout_seconds = 120
+
+
+# -----------------------------------------------------------------------------
+# [defaults.vss] - Default Volume Shadow Copy (VSS) settings
+# -----------------------------------------------------------------------------
+# VSS allows consistent point-in-time snapshots of game data.
+#
+[defaults.vss]
+
+# Base directory for mounting VSS shadow copies on compute nodes.
+# Each backup operation creates a temporary mount point under this path.
+# Must be on an NTFS volume. The directory is created automatically.
+mount_base = "C:\\SEBackup\\vss_mount"

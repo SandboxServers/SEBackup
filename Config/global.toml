@@ -1,0 +1,49 @@
+# SEBackup Global Configuration
+# This file defines system-wide settings for the SEBackup C&C server.
+
+[storage]
+cc_backup_root  = "C:\\SEBackup\\Backups"
+nas_backup_path = ""
+
+[retention]
+cc_full_count      = 2
+nas_retention_days = 90
+
+[schedule]
+enabled                      = true
+interval_hours               = 6
+full_backup_interval_hours   = 168
+max_incremental_chain_length = 48
+start_time                   = "02:00"
+
+[compression]
+engine     = "auto"
+level_7zip = 5
+
+[network]
+max_bandwidth_mbps = 100
+robocopy_ipg_ms    = 0
+
+[load_awareness]
+enabled                = true
+max_cpu_percent        = 80
+max_memory_percent     = 85
+sim_speed_threshold    = 0.8
+check_interval_seconds = 30
+backoff_multiplier     = 2.0
+max_backoff_minutes    = 60
+
+[notifications]
+enabled    = false
+on_success = false
+on_failure = true
+on_warning = true
+webhook_url = ""
+method     = "discord"
+
+[defaults.vrage_api]
+port                 = 8080
+save_timeout_seconds = 120
+
+[defaults.vss]
+mount_base = "C:\\SEBackup\\vss_mount"
