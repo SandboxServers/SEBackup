@@ -74,7 +74,8 @@ function Register-SEBScheduledTask {
             }
 
             try {
-                $GlobalConfig = Import-PSToml -Path $configPath
+                $rawToml = Get-Content -Path $configPath -Raw -ErrorAction Stop
+                $GlobalConfig = ConvertFrom-Toml -InputObject $rawToml
             }
             catch {
                 throw "Failed to parse global configuration at '$configPath': $_"

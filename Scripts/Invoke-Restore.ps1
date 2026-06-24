@@ -342,29 +342,31 @@ try {
     # ── Step 1: Safety backup ─────────────────────────────────────────────
     if (-not $SkipSafetyBackup) {
         Write-Host '[1/4] Creating safety backup of current world...' -ForegroundColor Yellow
-        try {
-            if (Get-Command -Name 'Invoke-SEBBackup' -ErrorAction SilentlyContinue) {
-                $safetyResult = Invoke-SEBBackup `
-                    -NodeName $NodeName `
-                    -InstanceName $InstanceName `
-                    -ForceFull `
-                    -SkipLoadCheck `
-                    -SkipNotify
 
-                if ($safetyResult -and $safetyResult.Success) {
-                    Write-Host '  [PASS] Safety backup created.' -ForegroundColor Green
-                }
-                else {
-                    Write-Host '  [WARN] Safety backup may have failed. Proceeding with restore.' -ForegroundColor DarkYellow
-                }
-            }
-            else {
-                Write-Host '  [SKIP] BackupEngine not available. No safety backup taken.' -ForegroundColor DarkYellow
-            }
+        # The safety backup is the ONLY recovery point if the restore goes wrong, so a failure
+        # here must abort the restore (the user can opt out explicitly with -SkipSafetyBackup).
+        if (-not (Get-Command -Name 'Invoke-SEBBackup' -ErrorAction SilentlyContinue)) {
+            throw "BackupEngine (Invoke-SEBBackup) is not available, so no safety backup can be taken. Aborting restore. Re-run with -SkipSafetyBackup to bypass this safeguard intentionally."
+        }
+
+        try {
+            $safetyResult = Invoke-SEBBackup `
+                -NodeName $NodeName `
+                -InstanceName $InstanceName `
+                -ForceFull `
+                -SkipLoadCheck `
+                -SkipNotify
         }
         catch {
-            Write-Host "  [WARN] Safety backup error: $_" -ForegroundColor DarkYellow
-            Write-Host '         Proceeding with restore anyway.' -ForegroundColor DarkGray
+            throw "Safety backup threw an error: $_. Aborting restore to preserve the current world. Re-run with -SkipSafetyBackup to bypass."
+        }
+
+        if ($safetyResult -and $safetyResult.Success) {
+            Write-Host '  [PASS] Safety backup created.' -ForegroundColor Green
+        }
+        else {
+            $safetyError = if ($safetyResult) { $safetyResult.ErrorMessage } else { 'no result returned' }
+            throw "Safety backup failed ($safetyError). Aborting restore so the current world is not left without a recovery point. Re-run with -SkipSafetyBackup to bypass this safeguard."
         }
     }
     else {

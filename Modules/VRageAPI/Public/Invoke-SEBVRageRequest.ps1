@@ -84,16 +84,17 @@ function Invoke-SEBVRageRequest {
         [object]$Body
     )
 
-    # Generate HMAC-SHA1 authentication headers
-    $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey
+    # Build the full API URL and the absolute path that the signature is bound to.
+    $requestPath = "/vrageremote/v1/${Endpoint}"
+    $url = "http://${Hostname}:${Port}${requestPath}"
+
+    # Generate HMAC-SHA1 authentication headers (signature is bound to the request path).
+    $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey -RequestUri $requestPath
 
     $headers = @{
         'Date'          = $authHeaders.Date
         'Authorization' = $authHeaders.Authorization
     }
-
-    # Build the full API URL
-    $url = "http://${Hostname}:${Port}/vrageremote/v1/${Endpoint}"
 
     # Build the request parameters
     $requestParams = @{

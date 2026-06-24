@@ -60,8 +60,7 @@ function Save-SEBCredential {
         }
     }
 
-    $credentialDir = Resolve-CredentialPath
-    $credentialFile = Join-Path -Path $credentialDir -ChildPath "$NodeName.cred.xml"
+    $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
     try {
         $Credential | Export-Clixml -Path $credentialFile -Force

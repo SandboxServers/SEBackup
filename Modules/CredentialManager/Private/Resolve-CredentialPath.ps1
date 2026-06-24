@@ -24,7 +24,12 @@ function Resolve-CredentialPath {
     #>
     [CmdletBinding()]
     [OutputType([string])]
-    param()
+    param(
+        # When supplied, returns the full credential FILE path for the node, with the node
+        # name validated so it cannot traverse out of the Credentials directory.
+        [Parameter()]
+        [string]$NodeName
+    )
 
     # Navigate from Modules/CredentialManager/ up to project root, then into Credentials/
     $projectRoot = Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent
@@ -33,6 +38,16 @@ function Resolve-CredentialPath {
     if (-not (Test-Path -Path $credentialDir)) {
         New-Item -Path $credentialDir -ItemType Directory -Force | Out-Null
         Write-Verbose "Created credentials directory: $credentialDir"
+    }
+
+    if ($PSBoundParameters.ContainsKey('NodeName')) {
+        # A node name is used as a filename component. Reject anything with a path separator,
+        # drive qualifier, or '.'/'..' so a hostile or fat-fingered name cannot write or read
+        # a credential file outside the Credentials directory.
+        if ($NodeName -notmatch '^[A-Za-z0-9._-]+$' -or $NodeName -in @('.', '..')) {
+            throw "Invalid node name '$NodeName': only letters, digits, '.', '-', and '_' are allowed (no path separators)."
+        }
+        return Join-Path -Path $credentialDir -ChildPath "$NodeName.cred.xml"
     }
 
     return $credentialDir

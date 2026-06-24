@@ -137,9 +137,16 @@ function Copy-SEBThrottled {
                 # Robocopy requires source dir and destination dir for directory copies,
                 # or source dir + file pattern for single files
                 if (Test-Path -Path $Source -PathType Leaf) {
+                    # Robocopy's second argument is the destination DIRECTORY, not a file path.
+                    # Passing a file path made robocopy create a directory by that name and copy
+                    # the file inside it. Split Destination into its directory and copy there.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $robocopyArgs = @($sourceDir, $Destination, $sourceFile, "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
+                    $destDir = [System.IO.Path]::GetDirectoryName($Destination)
+                    if (-not (Test-Path -Path $destDir -PathType Container)) {
+                        New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    }
+                    $robocopyArgs = @($sourceDir, $destDir, $sourceFile, "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
                 }
                 else {
                     $robocopyArgs = @($Source, $Destination, '/E', "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
@@ -158,9 +165,14 @@ function Copy-SEBThrottled {
                 $method = 'Robocopy'
 
                 if (Test-Path -Path $Source -PathType Leaf) {
+                    # Robocopy's second argument is the destination DIRECTORY, not a file path.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $robocopyArgs = @($sourceDir, $Destination, $sourceFile, '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
+                    $destDir = [System.IO.Path]::GetDirectoryName($Destination)
+                    if (-not (Test-Path -Path $destDir -PathType Container)) {
+                        New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    }
+                    $robocopyArgs = @($sourceDir, $destDir, $sourceFile, '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
                 }
                 else {
                     $robocopyArgs = @($Source, $Destination, '/E', '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
@@ -202,6 +214,20 @@ function Copy-SEBThrottled {
     }
 
     $stopwatch.Stop()
+
+    # Robocopy copies a leaf into a directory keeping the source filename. If the requested
+    # Destination filename differs, move it into place; then verify the file actually landed
+    # (robocopy can report a success-ish exit code while leaving nothing at the expected path).
+    if ($method -eq 'Robocopy' -and (Test-Path -Path $Source -PathType Leaf)) {
+        $landed = Join-Path -Path ([System.IO.Path]::GetDirectoryName($Destination)) -ChildPath ([System.IO.Path]::GetFileName($Source))
+        if ($landed -ne $Destination -and (Test-Path -Path $landed -PathType Leaf)) {
+            Move-Item -Path $landed -Destination $Destination -Force -ErrorAction Stop
+        }
+        if (-not (Test-Path -Path $Destination -PathType Leaf)) {
+            throw "Throttled copy did not produce the destination file '$Destination'."
+        }
+    }
+
     $durationSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
 
     # Calculate average throughput in Mbps

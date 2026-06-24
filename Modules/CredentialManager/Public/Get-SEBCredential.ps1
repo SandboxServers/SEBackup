@@ -37,8 +37,7 @@ function Get-SEBCredential {
         [string]$NodeName
     )
 
-    $credentialDir = Resolve-CredentialPath
-    $credentialFile = Join-Path -Path $credentialDir -ChildPath "$NodeName.cred.xml"
+    $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
     if (-not (Test-Path -Path $credentialFile)) {
         throw "No credential found for node '$NodeName'. Expected file: $credentialFile`n" +
