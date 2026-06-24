@@ -488,6 +488,13 @@ function Invoke-SEBBackup {
         $manifestFileName = "${InstanceName}_${typeLabel}_${timestamp}.json"
         $ccManifestPath = Join-Path -Path $ccManifestDir -ChildPath $manifestFileName
 
+        # Record the archive so Write-SEBManifest can embed archive_sha256 / archive_size_bytes
+        # (used by Level-2/Level-3 integrity and by restore-time verification). archive_path is
+        # the archive's filename relative to the manifest; _archive_path is the local full path
+        # used only to compute the hash and is stripped from the written JSON.
+        $manifest['archive_path'] = $archiveFileName
+        $manifest['_archive_path'] = $ccArchivePath
+
         Write-SEBManifest -Manifest $manifest -Path $ccManifestPath
         $result.ManifestFile = $ccManifestPath
         $result.ChainId = $manifest['chain_id']

@@ -48,25 +48,23 @@ function Compare-ReconstructedState {
     try {
         $mismatches = [System.Collections.Generic.List[string]]::new()
 
-        # Build expected file list from manifest
+        # Build expected file list from the manifest's path-keyed 'files' hashtable
+        # (v2 schema: relativePath -> @{ size; sha256; last_write }). Keys are normalized
+        # to forward slashes, so compare against forward-slash actual paths.
         $expectedFiles = @{}
         if ($Manifest.files) {
-            foreach ($entry in $Manifest.files) {
-                $relativePath = $entry.relative_path
-                if (-not $relativePath -and $entry.path) {
-                    $relativePath = $entry.path
-                }
-                if ($relativePath) {
-                    $expectedFiles[$relativePath] = $entry
-                }
+            foreach ($relativePath in $Manifest.files.Keys) {
+                $expectedFiles[$relativePath] = $Manifest.files[$relativePath]
             }
         }
 
-        # Get actual files in the reconstructed directory
+        # Get actual files in the reconstructed directory (normalize to forward slashes
+        # so the keys line up with the manifest's forward-slash relative paths).
+        $rootLen = $ReconstructedPath.TrimEnd('\', '/').Length
         $actualFiles = @{}
         $reconstructedItems = Get-ChildItem -Path $ReconstructedPath -Recurse -File -ErrorAction Stop
         foreach ($file in $reconstructedItems) {
-            $relativePath = $file.FullName.Substring($ReconstructedPath.Length).TrimStart('\', '/')
+            $relativePath = $file.FullName.Substring($rootLen).TrimStart('\', '/').Replace('\', '/')
             $actualFiles[$relativePath] = $file
         }
 

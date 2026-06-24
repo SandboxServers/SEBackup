@@ -116,16 +116,21 @@ function Test-SEBChainIntegrity {
         $archiveResults = [System.Collections.Generic.List[PSCustomObject]]::new()
         $allArchivesPassed = $true
 
+        $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
         foreach ($manifest in $chain) {
-            $archivePath = $manifest.archive_path
-            $manifestPath = $manifest._manifest_path  # Internal path set by Get-SEBManifestChain
-
-            # If the manifest object doesn't carry its own path, derive it
-            if (-not $manifestPath) {
-                $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
-                $manifestFileName = [System.IO.Path]::GetFileNameWithoutExtension($archivePath) + '.manifest.json'
-                $manifestPath = Join-Path -Path $instanceDir -ChildPath $manifestFileName
+            # archive_path is the archive's filename; resolve it to the full path under
+            # <BackupRoot>/<Instance>/<type>/ (matching the layout Invoke-SEBBackup writes).
+            $archiveFileName = $manifest.archive_path
+            $archivePath = if ($archiveFileName) {
+                Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $manifest.type) -ChildPath $archiveFileName
             }
+            else { $null }
+
+            # Resolve the manifest's own file path from the filename recorded by Read-SEBManifest.
+            $manifestPath = if ($manifest._source_filename) {
+                Join-Path -Path (Join-Path -Path $instanceDir -ChildPath 'manifests') -ChildPath $manifest._source_filename
+            }
+            else { $null }
 
             if (-not $archivePath -or -not (Test-Path -Path $archivePath -PathType Leaf)) {
                 $archiveResults.Add([PSCustomObject]@{
@@ -181,7 +186,7 @@ function Test-SEBChainIntegrity {
         Write-Verbose "IntegrityManager: Reconstructing chain in temp directory '$tempDir'"
 
         $fullManifest = $chain[0]
-        $fullArchivePath = $fullManifest.archive_path
+        $fullArchivePath = Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $fullManifest.type) -ChildPath $fullManifest.archive_path
 
         # Extract the full backup
         Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir
@@ -193,7 +198,7 @@ function Test-SEBChainIntegrity {
         # --- Step 4: Layer each incremental in order ---
         for ($i = 1; $i -lt $chain.Count; $i++) {
             $incManifest = $chain[$i]
-            $incArchivePath = $incManifest.archive_path
+            $incArchivePath = Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $incManifest.type) -ChildPath $incManifest.archive_path
 
             Write-Verbose "IntegrityManager: Applying incremental $i of $($chain.Count - 1): $incArchivePath"
 

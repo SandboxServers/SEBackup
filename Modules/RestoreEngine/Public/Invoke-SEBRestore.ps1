@@ -435,12 +435,11 @@ function Invoke-SEBRestore {
         } -ArgumentList $tempRestoreDir, $targetManifest['files'] -ErrorAction Stop
 
         if ($verifyResult.Mismatches.Count -gt 0) {
+            # The reconstructed world does not match the manifest. Abort BEFORE deploy so the
+            # live world (and the pre-restore safety backup) remain intact -- deploying a
+            # known-corrupt reconstruction is the worst possible outcome for a restore tool.
             $mismatchSample = $verifyResult.Mismatches | Select-Object -First 5
-            $warnMsg = "Reconstruction verification found $($verifyResult.Mismatches.Count) mismatch(es): $($mismatchSample -join '; ')"
-            $warnings.Add($warnMsg)
-            if ($hasLogger) {
-                Write-SEBLog -Message $warnMsg -Level WARN -Context $InstanceName
-            }
+            throw "Reconstruction verification failed with $($verifyResult.Mismatches.Count) mismatch(es); aborting before deploy to avoid restoring a corrupt world. Samples: $($mismatchSample -join '; ')"
         }
         else {
             if ($hasLogger) {
