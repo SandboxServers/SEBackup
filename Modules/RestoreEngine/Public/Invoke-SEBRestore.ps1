@@ -89,6 +89,7 @@ function Invoke-SEBRestore {
     $overallStart = Get-Date
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
     $warnings = [System.Collections.Generic.List[string]]::new()
+    $lockAcquired = $false
 
     $result = [PSCustomObject]@{
         Success          = $false
@@ -101,6 +102,20 @@ function Invoke-SEBRestore {
     }
 
     try {
+        # ====================================================================
+        # STEP 0: Acquire the per-instance lock. This is the SAME lock the backup
+        # engine uses, so a restore cannot run concurrently with a scheduled backup
+        # (or another restore) of the same instance and corrupt the world mid-write.
+        # ====================================================================
+        $lockResult = New-SEBLockFile -InstanceName $InstanceName
+        if (-not $lockResult.Acquired) {
+            throw "Could not acquire lock for restore of '$InstanceName': $($lockResult.Reason)"
+        }
+        $lockAcquired = $true
+        if ($lockResult.StaleLockBroken) {
+            $warnings.Add("A stale lock was broken before the restore acquired its lock.")
+        }
+
         # ====================================================================
         # STEP 1: Load configs, create session
         # ====================================================================
@@ -553,6 +568,12 @@ function Invoke-SEBRestore {
 
         if ($hasLogger) {
             Write-SEBLog -Message "=== Restore FAILED for '$InstanceName': $($_.Exception.Message) ===" -Level ERROR -Context $InstanceName
+        }
+    }
+    finally {
+        # Always release the instance lock.
+        if ($lockAcquired) {
+            Remove-SEBLockFile -InstanceName $InstanceName | Out-Null
         }
     }
 

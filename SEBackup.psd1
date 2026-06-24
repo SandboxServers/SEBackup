@@ -125,6 +125,8 @@
         'Invoke-SEBBackupAll'
         'Get-SEBBackupHistory'
         'Remove-SEBExpiredBackups'
+        'New-SEBLockFile'
+        'Remove-SEBLockFile'
 
         # RestoreEngine
         'Invoke-SEBRestore'
