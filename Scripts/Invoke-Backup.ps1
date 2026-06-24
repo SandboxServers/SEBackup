@@ -162,7 +162,7 @@ Write-Host ''
 $logContext = $null
 if (Get-Command -Name 'Start-SEBLogContext' -ErrorAction SilentlyContinue) {
     try {
-        $logContext = Start-SEBLogContext -Operation 'Backup'
+        $logContext = Start-SEBLogContext -Context 'Backup'
     }
     catch {
         Write-Verbose "Could not start log context: $_"

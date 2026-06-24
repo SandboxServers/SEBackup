@@ -110,6 +110,13 @@ function Send-SEBBackupNotification {
             return
         }
 
+        # Normalize result property names: accept both the canonical Invoke-SEBBackup
+        # result shape (BackupType / ArchiveSizeBytes / FileCount) and the generic shape
+        # documented for this function (Type / ArchiveSize / FilesChanged).
+        $btype = if ($BackupResult.BackupType) { $BackupResult.BackupType } elseif ($BackupResult.Type) { $BackupResult.Type } else { 'Unknown' }
+        $barchiveSize = if ($null -ne $BackupResult.ArchiveSizeBytes) { $BackupResult.ArchiveSizeBytes } else { $BackupResult.ArchiveSize }
+        $bfilesChanged = if ($null -ne $BackupResult.FileCount) { $BackupResult.FileCount } else { $BackupResult.FilesChanged }
+
         # Format duration
         $durationFormatted = 'N/A'
         if ($null -ne $BackupResult.Duration) {
@@ -131,8 +138,8 @@ function Send-SEBBackupNotification {
 
         # Format archive size
         $sizeFormatted = 'N/A'
-        if ($null -ne $BackupResult.ArchiveSize -and $BackupResult.ArchiveSize -gt 0) {
-            $bytes = [long]$BackupResult.ArchiveSize
+        if ($null -ne $barchiveSize -and $barchiveSize -gt 0) {
+            $bytes = [long]$barchiveSize
             if ($bytes -ge 1GB) {
                 $sizeFormatted = '{0:N1} GB' -f ($bytes / 1GB)
             }
@@ -149,10 +156,10 @@ function Send-SEBBackupNotification {
 
         # Build fields
         $fields = @{
-            'Type'          = if ($BackupResult.Type) { $BackupResult.Type } else { 'Unknown' }
+            'Type'          = $btype
             'Duration'      = $durationFormatted
             'Size'          = $sizeFormatted
-            'Files Changed' = if ($null -ne $BackupResult.FilesChanged) { [string]$BackupResult.FilesChanged } else { 'N/A' }
+            'Files Changed' = if ($null -ne $bfilesChanged) { [string]$bfilesChanged } else { 'N/A' }
         }
 
         # Build title and message
@@ -163,11 +170,11 @@ function Send-SEBBackupNotification {
         }
 
         $message = switch ($notifType) {
-            'Success' { "$($BackupResult.Type) backup of **$InstanceName** completed successfully." }
-            'Warning' { "$($BackupResult.Type) backup of **$InstanceName** completed with warnings." }
+            'Success' { "$btype backup of **$InstanceName** completed successfully." }
+            'Warning' { "$btype backup of **$InstanceName** completed with warnings." }
             'Failure' {
                 $errMsg = if ($BackupResult.ErrorMessage) { $BackupResult.ErrorMessage } else { 'Unknown error' }
-                "$($BackupResult.Type) backup of **$InstanceName** failed: $errMsg"
+                "$btype backup of **$InstanceName** failed: $errMsg"
             }
         }
 

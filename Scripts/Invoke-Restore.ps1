@@ -328,7 +328,7 @@ if (-not $Force) {
 $logContext = $null
 if (Get-Command -Name 'Start-SEBLogContext' -ErrorAction SilentlyContinue) {
     try {
-        $logContext = Start-SEBLogContext -Operation 'Restore'
+        $logContext = Start-SEBLogContext -Context 'Restore'
     }
     catch {
         Write-Verbose "Could not start log context: $_"
@@ -390,8 +390,7 @@ try {
         $restoreResult = Invoke-SEBRestore `
             -NodeName $NodeName `
             -InstanceName $InstanceName `
-            -RestorePoint $selectedPoint.PointId `
-            -ManifestPath $selectedPoint.ManifestPath
+            -RestorePoint $selectedPoint.PointId
 
         if ($restoreResult -and $restoreResult.Success) {
             $restoreSuccess = $true

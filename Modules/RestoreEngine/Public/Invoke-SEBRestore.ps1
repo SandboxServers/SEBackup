@@ -297,7 +297,9 @@ function Invoke-SEBRestore {
                 $sharePath = Get-SEBSharePath -NodeConfig $shareNodeConfig -InstanceConfig $shareInstanceConfig
 
                 $shareDestPath = Join-Path -Path $sharePath -ChildPath "restore_temp_$(Split-Path -Path $archivePath -Leaf)"
-                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -Config $globalConfig.network
+                $netBandwidthMbps = if ($globalConfig.network.max_bandwidth_mbps) { [int]$globalConfig.network.max_bandwidth_mbps } else { 0 }
+                $netRobocopyIpgMs = if ($globalConfig.network.robocopy_ipg_ms) { [int]$globalConfig.network.robocopy_ipg_ms } else { 0 }
+                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -MaxBandwidthMbps $netBandwidthMbps -RobocopyIpgMs $netRobocopyIpgMs
 
                 # Get the local path on the node for the archive
                 $nodeArchiveTempPath = Invoke-Command -Session $session -ScriptBlock {
