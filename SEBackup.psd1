@@ -114,7 +114,11 @@
         'Test-SEBNotificationConfig'
 
         # MetricsCollector
-        # (functions will be added as the module is built)
+        'Add-SEBMetric'
+        'Get-SEBMetrics'
+        'Get-SEBDiskSpace'
+        'Get-SEBHealthSummary'
+        'Clear-SEBOldMetrics'
 
         # BackupEngine
         'Invoke-SEBBackup'
@@ -123,7 +127,10 @@
         'Remove-SEBExpiredBackups'
 
         # RestoreEngine
-        # (functions will be added as the module is built)
+        'Invoke-SEBRestore'
+        'Get-SEBRestorePoints'
+        'Test-SEBRestoreChain'
+        'Undo-SEBRestore'
 
         # SchedulerManager
         'Register-SEBScheduledTask'
