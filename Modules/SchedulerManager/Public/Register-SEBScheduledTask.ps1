@@ -113,11 +113,20 @@ function Register-SEBScheduledTask {
             -Argument "-NoProfile -File `"$scriptPath`" -All" `
             -WorkingDirectory $projectRoot
 
-        # Build the principal: current user, highest privileges, run whether logged on or not
+        # Build the principal: current user, highest privileges, run whether logged on or not.
+        # NOTE: S4U logon does not load the user's password/profile, so DPAPI-encrypted
+        # credentials (Save-SEBCredential) saved interactively may fail to decrypt under the
+        # task even though they decrypt fine in an interactive session. Warn the operator.
         $principal = New-ScheduledTaskPrincipal `
             -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
             -LogonType S4U `
             -RunLevel Highest
+
+        Write-Warning ("Scheduled task '$TaskName' uses S4U logon. DPAPI-encrypted node " +
+            "credentials must be saved as the SAME user this task runs as. If scheduled backups " +
+            "fail to decrypt credentials (while manual runs succeed), re-register the task with a " +
+            "stored password (LogonType Password) or use a group Managed Service Account so the " +
+            "DPAPI master key is available unattended.")
 
         # Build task settings
         $settings = New-ScheduledTaskSettingsSet `
