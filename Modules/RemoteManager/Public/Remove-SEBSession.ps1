@@ -48,10 +48,12 @@ function Remove-SEBSession {
         foreach ($name in $nodeNames) {
             $session = $script:SEBSessions[$name]
             try {
-                Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+                Remove-PSSession -Session $session -ErrorAction Stop
                 Write-Verbose "Removed session for node '$name' (ID: $($session.Id))"
             }
             catch {
+                # Surface the failure (the session is still dropped from the cache below, since
+                # a session we cannot remove is one we should stop reusing).
                 Write-Warning "Failed to cleanly remove session for node '$name': $_"
             }
             $script:SEBSessions.Remove($name)
@@ -70,7 +72,7 @@ function Remove-SEBSession {
 
         $session = $script:SEBSessions[$NodeName]
         try {
-            Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+            Remove-PSSession -Session $session -ErrorAction Stop
             Write-Verbose "Removed session for node '$NodeName' (ID: $($session.Id))"
         }
         catch {

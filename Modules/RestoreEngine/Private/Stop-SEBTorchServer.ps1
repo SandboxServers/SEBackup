@@ -160,8 +160,30 @@ function Stop-SEBTorchServer {
                     Start-Sleep -Seconds 3
                     $ping = Test-SEBVRageAPI -Hostname $nodeHostname -Port $vragePort -SecurityKey $vrageKey
                     if (-not $ping) {
+                        # The API is down, but the process may still be flushing and closing the
+                        # world files. Overwriting the world dir while those handles are open
+                        # corrupts the restore, so wait for the actual process to exit (handles
+                        # released), then settle briefly. Fall back to the settle delay alone if
+                        # the process cannot be located by name.
+                        $procName = if ($InstanceConfig.ContainsKey('process_name') -and -not [string]::IsNullOrWhiteSpace($InstanceConfig['process_name'])) {
+                            $InstanceConfig['process_name']
+                        }
+                        else { 'Torch.Server' }
+
+                        while ((Get-Date) -lt $deadline) {
+                            $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
+                                param($name)
+                                [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)
+                            } -ArgumentList $procName -ErrorAction SilentlyContinue
+                            if (-not $stillRunning) { break }
+                            Start-Sleep -Seconds 2
+                        }
+
+                        # Settle to let the OS release any lingering file handles.
+                        Start-Sleep -Seconds 3
+
                         if ($hasLogger) {
-                            Write-SEBLog -Message "Console-mode Torch server stopped (API unreachable)." -Level INFO -Context $instanceName
+                            Write-SEBLog -Message "Console-mode Torch server stopped (API unreachable, process '$procName' exited)." -Level INFO -Context $instanceName
                         }
                         return [PSCustomObject]@{
                             Stopped      = $true
