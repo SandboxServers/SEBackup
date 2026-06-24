@@ -414,7 +414,7 @@ Describe 'VRageAPI Module' {
         It 'Generates valid auth headers with required keys' {
             # Access the private function through the module scope
             $headers = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             $headers | Should -Not -BeNullOrEmpty
@@ -426,7 +426,7 @@ Describe 'VRageAPI Module' {
 
         It 'Date header is in RFC1123 format' {
             $headers = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             # RFC1123 format: "Thu, 27 Feb 2026 12:00:00 GMT"
@@ -435,7 +435,7 @@ Describe 'VRageAPI Module' {
 
         It 'Authorization header contains nonce and base64 signature separated by colon' {
             $headers = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             $headers.Authorization | Should -Match '^[a-f0-9]+:.+$'
@@ -443,7 +443,7 @@ Describe 'VRageAPI Module' {
 
         It 'Nonce is a 32-character hex string' {
             $headers = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             $headers.Nonce | Should -Match '^[a-f0-9]{32}$'
@@ -451,10 +451,10 @@ Describe 'VRageAPI Module' {
 
         It 'Generates different nonces for different calls' {
             $headers1 = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
             $headers2 = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             $headers1.Nonce | Should -Not -Be $headers2.Nonce
@@ -462,7 +462,7 @@ Describe 'VRageAPI Module' {
 
         It 'Nonce in Authorization header matches the Nonce key' {
             $headers = & (Get-Module VRageAPI) {
-                New-SEBVRageAuthHeaders -SecurityKey 'TestKey123'
+                New-SEBVRageAuthHeaders -SecurityKey 'YWJjZGVmZ2g=' -RequestUri '/vrageremote/v1/server'
             }
 
             $authNonce = ($headers.Authorization -split ':')[0]

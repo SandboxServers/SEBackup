@@ -153,16 +153,29 @@ function Send-SEBNotification {
                 }
 
                 if ($statusCode -eq 429 -and $attempt -lt $maxRetries) {
-                    # Rate limited - respect Retry-After header
+                    # Rate limited - respect Retry-After. In PowerShell 7 the response Headers
+                    # are HttpResponseHeaders (not a string-indexable dictionary), so the old
+                    # $Headers['Retry-After'] always returned nothing and the backoff was always
+                    # the 5s default. Use TryGetValues / the typed RetryAfter, and fall back to
+                    # the JSON body's retry_after (Discord sends it there too).
                     $retryAfter = 5  # Default backoff in seconds
                     try {
-                        $retryHeader = $_.Exception.Response.Headers['Retry-After']
-                        if ($retryHeader) {
-                            $retryAfter = [math]::Ceiling([double]$retryHeader)
+                        $respHeaders = $_.Exception.Response.Headers
+                        $headerVals = $null
+                        if ($respHeaders -and $respHeaders.TryGetValues('Retry-After', [ref]$headerVals)) {
+                            $first = @($headerVals)[0]
+                            if ($first) { $retryAfter = [math]::Ceiling([double]$first) }
+                        }
+                        elseif ($respHeaders.RetryAfter -and $respHeaders.RetryAfter.Delta) {
+                            $retryAfter = [math]::Ceiling($respHeaders.RetryAfter.Delta.TotalSeconds)
+                        }
+                        elseif ($_.ErrorDetails.Message) {
+                            $body = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction Stop
+                            if ($body.retry_after) { $retryAfter = [math]::Ceiling([double]$body.retry_after) }
                         }
                     }
                     catch {
-                        # Use default backoff if header parsing fails
+                        # Use default backoff if header/body parsing fails
                     }
 
                     Write-Warning "Send-SEBNotification: Rate limited (HTTP 429). Retrying in ${retryAfter}s (attempt $attempt/$maxRetries)."

@@ -79,12 +79,24 @@ function Test-SEBConnection {
         return $false
     }
 
+    # Resolve the actual hostname/IP from the node config (the NodeName is just a label).
+    # Connecting to the NodeName directly only works when it happens to equal the DNS name;
+    # the rest of the system connects via the configured hostname, so match that here.
+    $computerName = $NodeName
+    $nodeConfig = Get-SEBNodeConfig -NodeName $NodeName -ErrorAction SilentlyContinue
+    if ($nodeConfig) {
+        $nc = if ($nodeConfig.ContainsKey('node')) { $nodeConfig['node'] } else { $nodeConfig }
+        if ($nc.ContainsKey('hostname') -and -not [string]::IsNullOrWhiteSpace($nc['hostname'])) {
+            $computerName = $nc['hostname']
+        }
+    }
+
     # Test basic WinRM connectivity
     $session = $null
     try {
         $sessionOption = New-PSSessionOption -OperationTimeout 15000 -OpenTimeout 15000
         $session = New-PSSession `
-            -ComputerName  $NodeName `
+            -ComputerName  $computerName `
             -Credential    $credential `
             -SessionOption $sessionOption `
             -ErrorAction   Stop

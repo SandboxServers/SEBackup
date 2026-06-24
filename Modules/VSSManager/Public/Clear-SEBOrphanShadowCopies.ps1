@@ -127,10 +127,16 @@ function Clear-SEBOrphanShadowCopies {
                             $mountTimestamp = $mount.Name -replace '^seb_', ''
                             if ($mountTimestamp -match '^\d{8}_\d{6}$') {
                                 try {
-                                    $mountTime = [DateTime]::ParseExact($mountTimestamp, 'yyyyMMdd_HHmmss', $null)
-                                    $shadowTime = $shadow.InstallDate
+                                    # Normalize BOTH sides to UTC before comparing. The mount
+                                    # name is local wall-clock; InstallDate's DateTimeKind can be
+                                    # Local or Utc depending on the CIM provider, so a naive
+                                    # subtraction was off by the UTC offset and mis-correlated
+                                    # (or missed) shadows. Parse with the invariant culture too.
+                                    $mountTime = [DateTime]::ParseExact($mountTimestamp, 'yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+                                    $mountTimeUtc = [DateTime]::SpecifyKind($mountTime, [DateTimeKind]::Local).ToUniversalTime()
+                                    $shadowTimeUtc = $shadow.InstallDate.ToUniversalTime()
                                     # If shadow was created within 60 seconds of mount point, likely ours
-                                    $timeDiff = [Math]::Abs(($shadowTime - $mountTime).TotalSeconds)
+                                    $timeDiff = [Math]::Abs(($shadowTimeUtc - $mountTimeUtc).TotalSeconds)
                                     if ($timeDiff -lt 60) {
                                         $isOrphaned = $true
                                         break

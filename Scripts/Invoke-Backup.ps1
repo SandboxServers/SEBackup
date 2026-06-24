@@ -380,3 +380,8 @@ else {
 
 Write-Host '╚══════════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
 Write-Host ''
+
+# Propagate failure as a non-zero exit code so the scheduled task (and any caller) sees it.
+# Without this the task always reported success even when every backup failed.
+if (-not $overallSuccess) { exit 1 }
+exit 0

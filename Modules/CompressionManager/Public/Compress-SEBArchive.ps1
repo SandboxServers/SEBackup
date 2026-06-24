@@ -116,15 +116,22 @@ function Compress-SEBArchive {
             $args7z = @('a', '-t7z', "-mx=$Level", $Destination)
             $args7z += $Sources
 
-            $process = Start-Process -FilePath $sevenZip -ArgumentList $args7z `
-                -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$env:TEMP\seb_7z_out.txt" `
-                -RedirectStandardError "$env:TEMP\seb_7z_err.txt"
+            # Use unique temp file names per invocation so concurrent backups on the same node
+            # (different instances, same user) do not overwrite each other's 7-Zip output and
+            # cross-read each other's exit diagnostics.
+            $runId = [guid]::NewGuid().ToString('n')
+            $stdoutPath = Join-Path -Path $env:TEMP -ChildPath "seb_7z_out_$runId.txt"
+            $stderrPath = Join-Path -Path $env:TEMP -ChildPath "seb_7z_err_$runId.txt"
 
-            $stdout = if (Test-Path "$env:TEMP\seb_7z_out.txt") { Get-Content "$env:TEMP\seb_7z_out.txt" -Raw } else { '' }
-            $stderr = if (Test-Path "$env:TEMP\seb_7z_err.txt") { Get-Content "$env:TEMP\seb_7z_err.txt" -Raw } else { '' }
+            $process = Start-Process -FilePath $sevenZip -ArgumentList $args7z `
+                -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath
+
+            $stdout = if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw } else { '' }
+            $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { '' }
 
             # Clean up temp files
-            Remove-Item -Path "$env:TEMP\seb_7z_out.txt", "$env:TEMP\seb_7z_err.txt" -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
             if ($process.ExitCode -ne 0) {
                 throw "7-Zip compression failed (exit code $($process.ExitCode)). Stderr: $stderr"

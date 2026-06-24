@@ -63,8 +63,10 @@ function Send-SEBRestoreNotification {
 
         # Check if restore notifications are enabled
         # Default to $true if on_restore is not explicitly set but notifications are enabled
+        # Skip only when on_restore is explicitly the boolean false. Absent means "default on";
+        # comparing a generic falsey value would wrongly disable on e.g. 0 or an empty string.
         $onRestore = $notifConfig['on_restore']
-        if ($null -ne $onRestore -and -not $onRestore) {
+        if ($onRestore -is [bool] -and -not $onRestore) {
             Write-Verbose "Restore notifications are disabled (notifications.on_restore = false). Skipping."
             return
         }

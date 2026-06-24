@@ -104,7 +104,11 @@ function Write-SEBLog {
     }
 
     process {
-        $timestamp = [datetime]::UtcNow
+        # Stamp lines in LOCAL time so the timestamp agrees with the local-dated log filename
+        # (Get-SEBLogPath) and the local-time 30-day rotation. Stamping UTC here meant a line
+        # written late in the local day could carry a timestamp from the next calendar day yet
+        # land in the current day's file.
+        $timestamp = Get-Date
 
         # Format the log line using the private helper
         $logLine = Format-LogLine -Message $Message -Level $Level -Context $effectiveContext -Timestamp $timestamp
