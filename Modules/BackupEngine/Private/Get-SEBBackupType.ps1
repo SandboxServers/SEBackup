@@ -84,9 +84,15 @@ function Get-SEBBackupType {
         }
     }
 
-    # Get all manifest files sorted by name (which includes timestamp) descending
+    # Sort manifests newest-first by the timestamp embedded in the filename
+    # (yyyyMMdd_HHmmss sorts chronologically as text). Sorting by raw Name is wrong because
+    # the name carries the type label (_FULL_/_INC_) before the timestamp, so a newer full
+    # can sort behind an older incremental.
     $manifestFiles = Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
-        Sort-Object -Property Name -Descending
+        Sort-Object -Property @{ Expression = {
+                if ($_.Name -match '_(\d{8}_\d{6})(?=\.[^.]+$)') { $Matches[1] } else { $_.Name }
+            }
+        } -Descending
 
     if (-not $manifestFiles -or $manifestFiles.Count -eq 0) {
         return [PSCustomObject]@{
@@ -104,6 +110,8 @@ function Get-SEBBackupType {
     $lastFullManifest = $null
 
     foreach ($mf in $manifestFiles) {
+        # Never treat a failed (BAD) backup as the latest manifest or a chain parent.
+        if ($mf.Name -match '_BAD\.json$') { continue }
         try {
             $content = Get-Content -Path $mf.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
             $content['_source_filename'] = $mf.Name

@@ -106,8 +106,28 @@ function New-SEBLockFile {
         instance  = $InstanceName
     }
 
+    # Create the lock file ATOMICALLY: FileMode.CreateNew fails if the file already exists,
+    # so if two runs race past the stale-check above, exactly one wins. A Test-Path-then-write
+    # would let both believe they acquired the lock.
     try {
-        $lockData | ConvertTo-Json -Depth 2 | Set-Content -Path $lockFilePath -Force -ErrorAction Stop
+        $lockJson = $lockData | ConvertTo-Json -Depth 2
+        $fs = [System.IO.File]::Open($lockFilePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($lockJson)
+            $fs.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $fs.Dispose()
+        }
+    }
+    catch [System.IO.IOException] {
+        # Another process created the lock between our check and our create.
+        return [PSCustomObject]@{
+            Acquired        = $false
+            LockFilePath    = $lockFilePath
+            Reason          = "Instance '$InstanceName' lock was acquired by another process concurrently."
+            StaleLockBroken = $staleBroken
+        }
     }
     catch {
         return [PSCustomObject]@{

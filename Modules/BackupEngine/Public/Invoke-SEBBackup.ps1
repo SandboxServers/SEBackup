@@ -598,7 +598,10 @@ function Invoke-SEBBackup {
         $result.IntegrityPassed = $integrityPassed
 
         if (-not $integrityPassed) {
-            # Mark backup as BAD by renaming with _BAD suffix
+            # Mark the backup as BAD by renaming with a _BAD suffix. Rename the manifest to
+            # match so the pair stays together: otherwise the retention orphan sweep sees a
+            # manifest with no same-named archive and deletes it, and Get-SEBBackupType would
+            # otherwise treat the failed backup as a valid chain parent.
             $badArchivePath = $ccArchivePath -replace '(\.\w+)$', '_BAD$1'
             try {
                 Rename-Item -Path $ccArchivePath -NewName (Split-Path -Path $badArchivePath -Leaf) -Force -ErrorAction Stop
@@ -606,6 +609,17 @@ function Invoke-SEBBackup {
             }
             catch {
                 $warnings.Add("Failed to rename failed archive to BAD: $_")
+            }
+
+            if (Test-Path -Path $ccManifestPath -PathType Leaf) {
+                $badManifestPath = $ccManifestPath -replace '(\.json)$', '_BAD$1'
+                try {
+                    Rename-Item -Path $ccManifestPath -NewName (Split-Path -Path $badManifestPath -Leaf) -Force -ErrorAction Stop
+                    $result.ManifestFile = $badManifestPath
+                }
+                catch {
+                    $warnings.Add("Failed to rename failed manifest to BAD: $_")
+                }
             }
         }
 
