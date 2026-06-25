@@ -93,23 +93,49 @@ BeforeAll {
             [PSCustomObject]@{ Success = $true; ArchiveFile = 'C:\cc\PvPArena\full\safety.7z'; ErrorMessage = $null }
         }
 
+        # Real .OUTPUTS shapes:
+        #   Stop-SEBTorchServer  -> @{ Stopped; Method; ErrorMessage }
+        #   Start-SEBTorchServer -> @{ Started; Method; APIResponding; ErrorMessage }
         Mock Stop-SEBTorchServer  -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
-        Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
+        Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; Method = 'service'; APIResponding = $true; ErrorMessage = $null } }
 
         Mock Deploy-SEBRestoredFiles -ModuleName RestoreEngine {
             [PSCustomObject]@{ Deployed = $true; PreRestorePath = 'D:\Torch\Instance\Saves\MyWorld_prerestore_20260101_010101'; FilesCopied = 42; RolledBack = $null; ErrorMessage = $null }
         }
 
         Mock Get-SEBSharePath -ModuleName RestoreEngine { '\\node01\SEBackup$' }
-        Mock Copy-SEBThrottled -ModuleName RestoreEngine {}
+        # Return Copy-SEBThrottled's REAL .OUTPUTS object (not nothing): the orchestrator pipes its
+        # result to | Out-Null, and only a realistic object proves that discard holds. If the Out-Null
+        # is dropped, this object leaks into Invoke-SEBRestore's output stream and @($r).Count -ne 1.
+        #   Copy-SEBThrottled -> @{ Source; Destination; SizeBytes; DurationSeconds; AverageMbps; Method }
+        Mock Copy-SEBThrottled -ModuleName RestoreEngine {
+            [PSCustomObject]@{ Source = $Source; Destination = $Destination; SizeBytes = 12345; DurationSeconds = 1.0; AverageMbps = 98.7; Method = 'Robocopy' }
+        }
         Mock Send-SEBRestoreNotification -ModuleName RestoreEngine {}
 
         # Reconstruction-verify remote block returns the mismatch set; the extract/cleanup/setup
         # blocks are side-effect-only. Route by block text.
-        Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'Mismatches' } {
+        #
+        # FRAGILITY (this is the SAFETY-CRITICAL verify gate -- do NOT route it on one incidental
+        # literal silently): the verify block is the only remote call whose RESULT decides whether the
+        # restore proceeds to overwrite the live world. If its filter ever matched the WRONG block (or
+        # nothing), every restore test would route the verify call to the catch-all `$null` mock, a
+        # null .Mismatches would read as "no mismatches", and the deploy-abort-on-corrupt-reconstruction
+        # guarantee would go completely untested while the suite stayed green. To make the match robust
+        # we require TWO independent, defining markers of that block -- 'Get-FileHash' (the verification
+        # operation itself) AND 'Mismatches' (its return key) -- so a rename of either alone does not
+        # silently misroute it. The two markers are inlined into each filter (not factored into a shared
+        # variable) so the filter scriptblock closes over nothing and cannot break if that variable
+        # falls out of the mock-invocation scope. If you change the verify block in Invoke-SEBRestore.ps1,
+        # update BOTH markers here in lock-step; the catch-all is keyed as the negation of the same pair.
+        Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter {
+            $ScriptBlock.ToString() -match 'Get-FileHash' -and $ScriptBlock.ToString() -match 'Mismatches'
+        } {
             @{ Checked = 1; Mismatches = $Mismatches; Total = 1 }
         }.GetNewClosure()
-        Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -notmatch 'Mismatches' } { $null }
+        Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter {
+            -not ($ScriptBlock.ToString() -match 'Get-FileHash' -and $ScriptBlock.ToString() -match 'Mismatches')
+        } { $null }
         # The archive-local-path lookup and deleted-files/cleanup use raw Invoke-Command.
         Mock Invoke-Command -ModuleName RestoreEngine { $null }
     }
@@ -260,14 +286,22 @@ Describe 'Invoke-SEBRestore failure injection' {
             Set-RestoreHappyMocks -GlobalConfig (New-RestoreGlobalConfig) -ChainManifestPaths @($man) -Mismatches @('HASH MISMATCH: Sandbox.sbc')
         }
 
-        It 'returns failure citing reconstruction verification and never stops the server or deploys' {
+        It 'returns failure citing reconstruction verification and leaves the live world + server untouched' {
             $r = Invoke-SEBRestore -NodeName 'node01' -InstanceName 'PvPArena' -RestorePoint 'PvPArena_FULL_verify.json' -Force
             $r.Success      | Should -BeFalse
             $r.ErrorMessage | Should -Match 'verification failed'
             # Critical: the server is stopped only AFTER a good reconstruction. A failed verify must
-            # leave the live world and server untouched.
+            # leave the live world and server untouched -- NOTHING destructive may have run: no stop,
+            # no deploy, no start. (UndoAvailable must stay false: no prerestore dir was created.)
             Should -Invoke Stop-SEBTorchServer     -ModuleName RestoreEngine -Times 0 -Exactly
             Should -Invoke Deploy-SEBRestoredFiles -ModuleName RestoreEngine -Times 0 -Exactly
+            Should -Invoke Start-SEBTorchServer    -ModuleName RestoreEngine -Times 0 -Exactly
+            $r.UndoAvailable | Should -BeFalse
+        }
+
+        It 'still releases the lock after the verify abort' {
+            Invoke-SEBRestore -NodeName 'node01' -InstanceName 'PvPArena' -RestorePoint 'PvPArena_FULL_verify.json' -Force | Out-Null
+            Should -Invoke Remove-SEBLockFile -ModuleName RestoreEngine -Times 1 -Exactly
         }
     }
 

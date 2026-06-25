@@ -116,13 +116,30 @@ BeforeAll {
             @{ Added = @('Sandbox.sbc'); Modified = @(); Deleted = @(); AddedCount = 1; ModifiedCount = 0; DeletedCount = 0; UnchangedCount = 0 }
         }
 
-        Mock Compress-SEBArchive -ModuleName BackupEngine { [PSCustomObject]@{ Success = $true } }
+        # Return the REAL .OUTPUTS shapes the production seams emit (not a fictional @{Success=$true}),
+        # so the single-object contract assertions actually exercise the orchestrator's `| Out-Null`
+        # discards: if an Out-Null is removed, the (now realistic) object leaks into the output stream
+        # and @($r).Count -ne 1 (mutation-checked).
+        #   Compress-SEBArchive -> @{ ArchivePath; SizeBytes; Engine; Duration }
+        Mock Compress-SEBArchive -ModuleName BackupEngine {
+            [PSCustomObject]@{ ArchivePath = $DestinationPath; SizeBytes = 12345; Engine = 'dotnet'; Duration = [timespan]::FromSeconds(2) }
+        }
         Mock Get-SEBSharePath -ModuleName BackupEngine { '\\node01\SEBackup$' }
-        Mock Copy-SEBThrottled -ModuleName BackupEngine {}
+        #   Copy-SEBThrottled -> @{ Source; Destination; SizeBytes; DurationSeconds; AverageMbps; Method }
+        Mock Copy-SEBThrottled -ModuleName BackupEngine {
+            [PSCustomObject]@{ Source = $Source; Destination = $Destination; SizeBytes = 12345; DurationSeconds = 1.0; AverageMbps = 98.7; Method = 'Robocopy' }
+        }
         Mock Write-SEBManifest -ModuleName BackupEngine {}
 
-        Mock Test-SEBArchiveIntegrity  -ModuleName BackupEngine { [PSCustomObject]@{ Passed = $true; ErrorMessage = $null } }
-        Mock Test-SEBManifestIntegrity -ModuleName BackupEngine { [PSCustomObject]@{ Passed = $true; ErrorMessage = $null } }
+        # Real .OUTPUTS shapes (orchestrator reads .Passed / .ErrorMessage):
+        #   Test-SEBArchiveIntegrity  -> @{ Level; Passed; ArchivePath; CheckedAt; ErrorMessage }
+        #   Test-SEBManifestIntegrity -> @{ Level; Passed; ArchivePath; ManifestPath; FileCountMatch; HashMatch; Mismatches; CheckedAt; ErrorMessage }
+        Mock Test-SEBArchiveIntegrity  -ModuleName BackupEngine {
+            [PSCustomObject]@{ Level = 1; Passed = $true; ArchivePath = $ArchivePath; CheckedAt = [datetime]::UtcNow; ErrorMessage = $null }
+        }
+        Mock Test-SEBManifestIntegrity -ModuleName BackupEngine {
+            [PSCustomObject]@{ Level = 2; Passed = $true; ArchivePath = $ArchivePath; ManifestPath = $ManifestPath; FileCountMatch = $true; HashMatch = $true; Mismatches = @(); CheckedAt = [datetime]::UtcNow; ErrorMessage = $null }
+        }
         Mock Add-SEBMetric -ModuleName BackupEngine {}
         Mock Send-SEBBackupNotification -ModuleName BackupEngine {}
         Mock Remove-SEBExpiredBackups -ModuleName BackupEngine {}
@@ -132,6 +149,17 @@ BeforeAll {
         #   * pathInfo   (Split-Path -Qualifier)  -> @{ VolumeRoot; WorldRelative }
         #   * archiveInfo (Get-Item .Length)      -> @{ SizeBytes; Exists }
         #   * prune / staging-cleanup             -> $null (side-effect only on the node)
+        #
+        # FRAGILITY (intentional, documented): these ParameterFilters disambiguate the remote calls by
+        # matching INCIDENTAL literals in each block's source text ('Split-Path .*-Qualifier' in the
+        # path-probe block; 'SizeBytes' in the archive-size block). Those literals are the only stable
+        # markers available without re-architecting the orchestrator to tag its remote blocks, but they
+        # are NOT a contract: if Invoke-SEBBackup.ps1 rewrites either block so the literal disappears
+        # (e.g. computes the qualifier differently, or renames the size field), the matching filter
+        # silently stops matching and that call falls through to the catch-all `$null` mock -- the
+        # backup then reads a $null pathInfo/archiveInfo and fails in a confusing way. If you touch
+        # those remote blocks, update the markers here in lock-step. The catch-all below is keyed as
+        # the NEGATION of the two specific markers for the same reason.
         Mock Invoke-SEBRemoteCommand -ModuleName BackupEngine -ParameterFilter { $ScriptBlock.ToString() -match 'Split-Path .*-Qualifier' } {
             @{ VolumeRoot = 'D:\'; WorldRelative = 'Torch\Instance\Saves\MyWorld' }
         }
@@ -184,11 +212,12 @@ Describe 'Invoke-SEBBackup happy path (FULL)' {
         $r.Duration        | Should -Not -BeNullOrEmpty
     }
 
-    It 'runs the pipeline in order (lock -> preflight -> VSS -> compress -> manifest write -> transfer -> retention -> notify)' {
+    It 'invokes each pipeline stage exactly once (lock, preflight, VSS, compress, manifest write, transfer, integrity, retention, notify)' {
         Invoke-SEBBackup -NodeName 'node01' -InstanceName 'PvPArena' -ForceFull | Out-Null
 
         # Each stage actually ran -- the assertions below are the "real orchestration" proof that the
-        # happy-path is not vacuous: if the orchestrator short-circuited, these would be 0.
+        # happy-path is not vacuous: if the orchestrator short-circuited, these would be 0. (This test
+        # asserts COUNTS only; the order-sensitive pairs are pinned in the next test.)
         Should -Invoke New-SEBLockFile          -ModuleName BackupEngine -Times 1 -Exactly -ParameterFilter { $InstanceName -eq 'PvPArena' }
         Should -Invoke Test-SEBPreFlight        -ModuleName BackupEngine -Times 1 -Exactly
         Should -Invoke Invoke-SEBWithShadowCopy -ModuleName BackupEngine -Times 1 -Exactly
@@ -199,6 +228,44 @@ Describe 'Invoke-SEBBackup happy path (FULL)' {
         Should -Invoke Test-SEBArchiveIntegrity -ModuleName BackupEngine -Times 1 -Exactly
         Should -Invoke Remove-SEBExpiredBackups -ModuleName BackupEngine -Times 1 -Exactly
         Should -Invoke Send-SEBBackupNotification -ModuleName BackupEngine -Times 1 -Exactly
+    }
+
+    It 'orders the data path correctly: compress BEFORE the manifest write, and integrity BEFORE the NAS publish' {
+        # Counts alone cannot catch a reordering that, say, published to NAS before integrity ran.
+        # Record the ACTUAL call order: re-mock the ordered seams (on top of the happy mocks) so each
+        # appends its stage name to a script-scoped list, then assert the order-sensitive pairs. Each
+        # recorder still returns the real .OUTPUTS shape so the orchestrator runs through unchanged.
+        $script:order = [System.Collections.Generic.List[string]]::new()
+        Mock Invoke-SEBWithShadowCopy -ModuleName BackupEngine { $script:order.Add('vss') }
+        Mock Compress-SEBArchive      -ModuleName BackupEngine {
+            $script:order.Add('compress')
+            [PSCustomObject]@{ ArchivePath = $DestinationPath; SizeBytes = 12345; Engine = 'dotnet'; Duration = [timespan]::FromSeconds(1) }
+        }
+        Mock Write-SEBManifest        -ModuleName BackupEngine { $script:order.Add('manifest_write') }
+        Mock Test-SEBArchiveIntegrity -ModuleName BackupEngine {
+            $script:order.Add('integrity')
+            [PSCustomObject]@{ Level = 1; Passed = $true; ArchivePath = $ArchivePath; CheckedAt = [datetime]::UtcNow; ErrorMessage = $null }
+        }
+        Mock Copy-SEBThrottled -ModuleName BackupEngine {
+            # Tag the NAS copy distinctly from the C&C transfer so the integrity<NAS pair is precise.
+            $tag = if ($Destination -like "$script:nasRoot*") { 'nas_copy' } else { 'cc_transfer' }
+            $script:order.Add($tag)
+            [PSCustomObject]@{ Source = $Source; Destination = $Destination; SizeBytes = 12345; DurationSeconds = 1.0; AverageMbps = 9.9; Method = 'Robocopy' }
+        }
+
+        Invoke-SEBBackup -NodeName 'node01' -InstanceName 'PvPArena' -ForceFull | Out-Null
+
+        $idx = @{}
+        foreach ($name in @('vss', 'compress', 'manifest_write', 'integrity', 'cc_transfer', 'nas_copy')) {
+            $idx[$name] = $script:order.IndexOf($name)
+            $idx[$name] | Should -BeGreaterThan -1 -Because "stage '$name' must have run"
+        }
+        # The load-bearing order constraints in the data path:
+        $idx['vss']            | Should -BeLessThan $idx['compress']        -Because 'the snapshot must be captured before it is compressed'
+        $idx['compress']       | Should -BeLessThan $idx['cc_transfer']     -Because 'the archive must exist on the node before it is transferred to C&C'
+        $idx['cc_transfer']    | Should -BeLessThan $idx['manifest_write']  -Because 'the manifest is written after the archive lands on C&C'
+        $idx['manifest_write'] | Should -BeLessThan $idx['integrity']       -Because 'integrity checks read the written manifest + archive'
+        $idx['integrity']      | Should -BeLessThan $idx['nas_copy']        -Because 'a corrupt archive must never be published to NAS -- integrity gates the NAS copy'
     }
 
     It 'releases the lock and tears down the session on the success path' {
@@ -257,6 +324,35 @@ Describe 'Invoke-SEBBackup happy path (INCREMENTAL)' {
         Invoke-SEBBackup -NodeName 'node01' -InstanceName 'Creative' | Out-Null
         # The prune call is the remote block that builds a HashSet of files to keep.
         Should -Invoke Invoke-SEBRemoteCommand -ModuleName BackupEngine -ParameterFilter { $ScriptBlock.ToString() -match 'HashSet' }
+    }
+
+    Context 'incremental with an EMPTY delta (no added/modified files) still succeeds and still prunes' {
+        BeforeAll {
+            $cfg = New-GlobalConfig
+            $prevManifest = New-ManifestObj -Type 'full' -ChainId 'chain-empty' -Seq 0
+            $bt = [PSCustomObject]@{ Type = 'incremental'; Reason = 'within interval'; LastFullManifest = $prevManifest; LastManifest = $prevManifest; ChainId = 'chain-empty'; ChainSequence = 1 }
+            Set-HappyMocks -GlobalConfig $cfg -BackupTypeObj $bt -ManifestObj (New-ManifestObj -Type 'incremental' -ChainId 'chain-empty' -Seq 1)
+            # The diff finds NOTHING changed since the parent: Added/Modified empty, counts zero. The
+            # orchestrator must warn that the archive will be empty but STILL prune staging and produce
+            # the (manifest-only) backup -- the empty-delta branch must not abort or short-circuit.
+            Mock Compare-SEBManifest -ModuleName BackupEngine {
+                @{ Added = @(); Modified = @(); Deleted = @(); AddedCount = 0; ModifiedCount = 0; DeletedCount = 0; UnchangedCount = 5 }
+            }
+        }
+
+        It 'succeeds, records the empty-archive warning, and still runs the staging prune' {
+            $r = Invoke-SEBBackup -NodeName 'node01' -InstanceName 'CreativeEmpty'
+            $r.Success    | Should -BeTrue
+            $r.BackupType | Should -Be 'incremental'
+            ($r.Warnings -join ' ') | Should -Match 'No file changes|empty'
+            # The diff ran, and the prune (HashSet keep-set) STILL ran even though nothing changed --
+            # the prune block sits after the empty-delta warning, not behind it.
+            Should -Invoke Compare-SEBManifest     -ModuleName BackupEngine -Times 1 -Exactly
+            Should -Invoke Invoke-SEBRemoteCommand  -ModuleName BackupEngine -ParameterFilter { $ScriptBlock.ToString() -match 'HashSet' }
+            # And the pipeline still completed the compress/transfer and ran retention.
+            Should -Invoke Compress-SEBArchive      -ModuleName BackupEngine -Times 1 -Exactly
+            Should -Invoke Remove-SEBExpiredBackups -ModuleName BackupEngine -Times 1 -Exactly
+        }
     }
 }
 
@@ -451,10 +547,14 @@ Describe 'Invoke-SEBBackup failure injection' {
                 if ($Destination -and (Split-Path $Destination -Parent | Test-Path)) {
                     Set-Content -LiteralPath $Destination -Value 'corrupt-archive-bytes' -NoNewline -ErrorAction SilentlyContinue
                 }
+                [PSCustomObject]@{ Source = $Source; Destination = $Destination; SizeBytes = 21; DurationSeconds = 0.1; AverageMbps = 1.0; Method = 'Robocopy' }
             }
             # Level-1 integrity fails. The orchestrator does NOT throw -- it marks the backup BAD,
             # renames archive+manifest, suppresses the NAS publish, and reports Success=$false.
-            Mock Test-SEBArchiveIntegrity -ModuleName BackupEngine { [PSCustomObject]@{ Passed = $false; ErrorMessage = 'CRC mismatch' } }
+            # Real .OUTPUTS: @{ Level; Passed; ArchivePath; CheckedAt; ErrorMessage }.
+            Mock Test-SEBArchiveIntegrity -ModuleName BackupEngine {
+                [PSCustomObject]@{ Level = 1; Passed = $false; ArchivePath = $ArchivePath; CheckedAt = [datetime]::UtcNow; ErrorMessage = 'CRC mismatch' }
+            }
         }
 
         # NOTE: each It uses a UNIQUE instance name. The orchestrator writes a REAL archive to
@@ -484,6 +584,63 @@ Describe 'Invoke-SEBBackup failure injection' {
 
         It 'still releases the lock and session' {
             Invoke-SEBBackup -NodeName 'node01' -InstanceName 'IntgD' -ForceFull | Out-Null
+            Should -Invoke Remove-SEBLockFile -ModuleName BackupEngine -Times 1 -Exactly
+            Should -Invoke Remove-SEBSession  -ModuleName BackupEngine -Times 1 -Exactly
+        }
+
+        It 'still runs retention on the integrity-failed path (a _BAD backup must not stop the sweep)' {
+            Invoke-SEBBackup -NodeName 'node01' -InstanceName 'IntgRet' -ForceFull | Out-Null
+            # Integrity failure is the SOFT path (no throw): the orchestrator runs to completion through
+            # metrics/notify/retention, so the expired-backup sweep must still fire exactly once.
+            Should -Invoke Remove-SEBExpiredBackups -ModuleName BackupEngine -Times 1 -Exactly -ParameterFilter { $InstanceName -eq 'IntgRet' }
+        }
+    }
+
+    Context 'integrity fails AND the _BAD rename itself fails -> partial state surfaced as a warning, not a crash' {
+        BeforeAll {
+            $cfg = New-GlobalConfig -Nas $script:nasRoot
+            $bt = [PSCustomObject]@{ Type = 'full'; Reason = 'x'; LastManifest = $null; ChainId = 'chain-badren'; ChainSequence = 0 }
+            Set-HappyMocks -GlobalConfig $cfg -BackupTypeObj $bt -ManifestObj (New-ManifestObj -ChainId 'chain-badren')
+            # The C&C transfer writes the REAL archive, then pre-creates the _BAD destination as a
+            # NON-EMPTY DIRECTORY at exactly the path the orchestrator will try to rename onto. A
+            # file->file Rename-Item -Force onto an existing directory of that name throws ("Cannot
+            # create a file when that file already exists"), exercising the catch that the happy _BAD
+            # rename never reaches.
+            Mock Copy-SEBThrottled -ModuleName BackupEngine {
+                if ($Destination -and (Split-Path $Destination -Parent | Test-Path)) {
+                    Set-Content -LiteralPath $Destination -Value 'corrupt-archive-bytes' -NoNewline -ErrorAction SilentlyContinue
+                    $badPath = $Destination -replace '(\.\w+)$', '_BAD$1'
+                    New-Item -ItemType Directory -Path $badPath -Force -ErrorAction SilentlyContinue | Out-Null
+                    Set-Content -LiteralPath (Join-Path $badPath 'blocker.txt') -Value 'x' -NoNewline -ErrorAction SilentlyContinue
+                }
+                [PSCustomObject]@{ Source = $Source; Destination = $Destination; SizeBytes = 21; DurationSeconds = 0.1; AverageMbps = 1.0; Method = 'Robocopy' }
+            }
+            Mock Test-SEBArchiveIntegrity -ModuleName BackupEngine {
+                [PSCustomObject]@{ Level = 1; Passed = $false; ArchivePath = $ArchivePath; CheckedAt = [datetime]::UtcNow; ErrorMessage = 'CRC mismatch' }
+            }
+        }
+
+        It 'reports Success=$false, records the rename failure as a warning, and does NOT throw out of the function' {
+            $r = Invoke-SEBBackup -NodeName 'node01' -InstanceName 'IntgRenFail' -ForceFull
+            # The function must STILL return a structured result (the rename failure is caught, not
+            # propagated): integrity failed so Success/IntegrityPassed are false, and a warning records
+            # that the _BAD rename could not complete.
+            $r.Success         | Should -BeFalse
+            $r.IntegrityPassed | Should -BeFalse
+            ($r.Warnings -join ' ') | Should -Match 'rename failed archive to BAD'
+            # Because the rename failed, ArchiveFile keeps the ORIGINAL (non-_BAD) path -- and that
+            # original file is still on disk (it was never moved).
+            $r.ArchiveFile | Should -Not -Match '_BAD'
+            Test-Path -LiteralPath $r.ArchiveFile | Should -BeTrue
+        }
+
+        It 'still gates NAS publish off (a failed-integrity archive is never published even if its _BAD rename failed)' {
+            Invoke-SEBBackup -NodeName 'node01' -InstanceName 'IntgRenFail2' -ForceFull | Out-Null
+            Should -Invoke Copy-SEBThrottled -ModuleName BackupEngine -ParameterFilter { $Destination -like "$script:nasRoot*" } -Times 0 -Exactly
+        }
+
+        It 'still releases the lock and tears down the session on the partial-state path' {
+            Invoke-SEBBackup -NodeName 'node01' -InstanceName 'IntgRenFail3' -ForceFull | Out-Null
             Should -Invoke Remove-SEBLockFile -ModuleName BackupEngine -Times 1 -Exactly
             Should -Invoke Remove-SEBSession  -ModuleName BackupEngine -Times 1 -Exactly
         }
