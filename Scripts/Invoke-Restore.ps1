@@ -146,7 +146,10 @@ $restorePoints = [System.Collections.Generic.List[object]]::new()
 try {
     # Look for manifest files in the backup directory
     if (Test-Path $instanceBackupDir) {
+        # Exclude '_BAD' artifacts -- a backup renamed '_BAD' failed integrity and must never be
+        # selectable as a restore point.
         $manifestFiles = Get-ChildItem -Path $instanceBackupDir -Filter '*.manifest.json' -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '_BAD\.' } |
             Sort-Object -Property LastWriteTime -Descending
 
         if ($manifestFiles -and $manifestFiles.Count -gt 0) {
@@ -203,7 +206,7 @@ try {
     # Also check for archive files without manifests
     if (Test-Path $instanceBackupDir) {
         $archiveFiles = Get-ChildItem -Path $instanceBackupDir -Include '*.7z', '*.zip' -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
+            Where-Object { $_.Name -notmatch '_BAD\.' -and $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
             Sort-Object -Property LastWriteTime -Descending
 
         foreach ($af in $archiveFiles) {

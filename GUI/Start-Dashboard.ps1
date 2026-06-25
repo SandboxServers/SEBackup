@@ -906,7 +906,10 @@ $RestoreInstanceCombo.Add_SelectionChanged({
 
     $points = [System.Collections.Generic.List[object]]::new()
 
+    # Exclude '_BAD' manifests -- these mark backups that failed integrity and must never be
+    # offered as a restore point (deploying one would overwrite the live world with corruption).
     $manifestFiles = Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '_BAD\.json$' } |
         Sort-Object Name -Descending
 
     foreach ($file in $manifestFiles) {

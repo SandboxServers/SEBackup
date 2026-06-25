@@ -40,6 +40,11 @@ function Invoke-SEBVRageRequest {
         An optional object to send as the request body. Will be serialized
         to JSON via ConvertTo-Json. Typically used with PATCH or POST methods.
 
+    .PARAMETER TimeoutSec
+        The per-request HTTP timeout in seconds. Defaults to 30. Callers that
+        issue potentially long-running requests (e.g. a synchronous world save)
+        should raise this so the request is not cut off prematurely.
+
     .EXAMPLE
         Invoke-SEBVRageRequest -Hostname 'localhost' -Port 8080 -SecurityKey 'MyKey123' -Endpoint 'server/ping'
         # Sends a GET request to http://localhost:8080/vrageremote/v1/server/ping
@@ -81,7 +86,11 @@ function Invoke-SEBVRageRequest {
         [string]$Endpoint,
 
         [Parameter()]
-        [object]$Body
+        [object]$Body,
+
+        [Parameter()]
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSec = 30
     )
 
     # Build the full API URL and the absolute path that the signature is bound to.
@@ -102,7 +111,7 @@ function Invoke-SEBVRageRequest {
         Method          = $Method
         Headers         = $headers
         ContentType     = 'application/json'
-        TimeoutSec      = 30
+        TimeoutSec      = $TimeoutSec
         ErrorAction     = 'Stop'
     }
 

@@ -82,6 +82,13 @@ function Test-SEBChainIntegrity {
     $tempDir = $null
 
     try {
+        # InstanceName becomes a directory segment (<BackupRoot>/<InstanceName>); reject any path
+        # traversal so a crafted instance name cannot redirect reads/extraction outside BackupRoot.
+        if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or [System.IO.Path]::IsPathRooted($InstanceName)) {
+            $result.ErrorMessage = "Invalid InstanceName '$InstanceName': path separators and traversal are not allowed."
+            return $result
+        }
+
         Write-Verbose "IntegrityManager: Level 3 chain integrity check for instance '$InstanceName'"
 
         if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
@@ -118,13 +125,10 @@ function Test-SEBChainIntegrity {
 
         $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
         foreach ($manifest in $chain) {
-            # archive_path is the archive's filename; resolve it to the full path under
-            # <BackupRoot>/<Instance>/<type>/ (matching the layout Invoke-SEBBackup writes).
-            $archiveFileName = $manifest.archive_path
-            $archivePath = if ($archiveFileName) {
-                Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $manifest.type) -ChildPath $archiveFileName
-            }
-            else { $null }
+            # Resolve archive_path to the full path under <BackupRoot>/<Instance>/<type>/, with
+            # traversal guards (archive_path/type are attacker-controllable manifest data) and a
+            # fallback for legacy manifests that predate the archive_path field.
+            $archivePath = Resolve-SEBChainArchivePath -Manifest $manifest -InstanceDir $instanceDir
 
             # Resolve the manifest's own file path from the filename recorded by Read-SEBManifest.
             $manifestPath = if ($manifest._source_filename) {
@@ -186,7 +190,11 @@ function Test-SEBChainIntegrity {
         Write-Verbose "IntegrityManager: Reconstructing chain in temp directory '$tempDir'"
 
         $fullManifest = $chain[0]
-        $fullArchivePath = Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $fullManifest.type) -ChildPath $fullManifest.archive_path
+        $fullArchivePath = Resolve-SEBChainArchivePath -Manifest $fullManifest -InstanceDir $instanceDir
+        if (-not $fullArchivePath -or -not (Test-Path -Path $fullArchivePath -PathType Leaf)) {
+            $result.ErrorMessage = "Full backup archive could not be resolved safely for instance '$InstanceName'."
+            return $result
+        }
 
         # Extract the full backup
         Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir
@@ -198,7 +206,11 @@ function Test-SEBChainIntegrity {
         # --- Step 4: Layer each incremental in order ---
         for ($i = 1; $i -lt $chain.Count; $i++) {
             $incManifest = $chain[$i]
-            $incArchivePath = Join-Path -Path (Join-Path -Path $instanceDir -ChildPath $incManifest.type) -ChildPath $incManifest.archive_path
+            $incArchivePath = Resolve-SEBChainArchivePath -Manifest $incManifest -InstanceDir $instanceDir
+            if (-not $incArchivePath -or -not (Test-Path -Path $incArchivePath -PathType Leaf)) {
+                $result.ErrorMessage = "Incremental archive $i could not be resolved safely for instance '$InstanceName'."
+                return $result
+            }
 
             Write-Verbose "IntegrityManager: Applying incremental $i of $($chain.Count - 1): $incArchivePath"
 

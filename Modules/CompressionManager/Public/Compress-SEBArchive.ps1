@@ -134,7 +134,8 @@ function Compress-SEBArchive {
             Remove-Item -Path $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
             if ($process.ExitCode -ne 0) {
-                throw "7-Zip compression failed (exit code $($process.ExitCode)). Stderr: $stderr"
+                # 7-Zip writes most actionable diagnostics to stdout, not stderr, so surface both.
+                throw "7-Zip compression failed (exit code $($process.ExitCode)). Stdout: $stdout Stderr: $stderr"
             }
 
             # Return archive size

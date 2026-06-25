@@ -43,9 +43,11 @@ BeforeAll {
     function Test-ParameterName {
         param([System.Collections.Generic.HashSet[string]]$Valid, [string]$Used)
         if ($Valid.Contains($Used)) { return $true }
-        # PowerShell allows unambiguous parameter-name prefixes.
-        $matches = @($Valid | Where-Object { $_.StartsWith($Used, [System.StringComparison]::OrdinalIgnoreCase) })
-        return ($matches.Count -eq 1)
+        # PowerShell allows unambiguous parameter-name prefixes. (Name it $prefixMatches, not
+        # $matches -- $Matches is a PowerShell automatic variable and assigning to it has side
+        # effects.)
+        $prefixMatches = @($Valid | Where-Object { $_.StartsWith($Used, [System.StringComparison]::OrdinalIgnoreCase) })
+        return ($prefixMatches.Count -eq 1)
     }
 }
 

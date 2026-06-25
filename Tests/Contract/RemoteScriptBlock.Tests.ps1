@@ -21,7 +21,7 @@ Describe 'Remote-executed script blocks stay node-local' {
             'session', 'result', 'warnings', 'backupDecision', 'globalConfig',
             'instanceConfig', 'nodeConfig', 'manifest', 'manifestDiff', 'hasLogger'
         )
-        $remoteWrappers = @('Invoke-SEBWithShadowCopy')
+        $remoteWrappers = @('Invoke-SEBWithShadowCopy', 'Invoke-SEBRemoteCommand')
 
         $tokens = $null; $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)

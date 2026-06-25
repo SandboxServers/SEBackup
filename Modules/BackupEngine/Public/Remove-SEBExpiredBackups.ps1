@@ -73,6 +73,29 @@ function Remove-SEBExpiredBackups {
     $ccIncDir = Join-Path -Path $ccInstanceDir -ChildPath 'incremental'
     $ccManifestDir = Join-Path -Path $ccInstanceDir -ChildPath 'manifests'
 
+    # Build the NAS chain map (archive base name -> chain_id) NOW, before Tier 2 deletes any
+    # C&C manifests. Tier 3's chain-aware NAS retention relies on this map; if it were built
+    # after Tier 2, an expired chain's manifests would already be gone, the NAS archives would
+    # fall into the per-file "singleton" bucket, and an old full could be aged out while a newer
+    # dependent incremental survives -- the exact orphaning chain-awareness is meant to prevent.
+    $chainOf = @{}
+    if (Test-Path -Path $ccManifestDir -PathType Container) {
+        foreach ($mf in (Get-ChildItem -Path $ccManifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+            try {
+                $mc = Get-Content -Path $mf.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+                if ($mc['chain_id']) { $chainOf[$mf.BaseName] = $mc['chain_id'] }
+            }
+            catch {
+                # Per CLAUDE.md, never silently swallow: a manifest we cannot read leaves its NAS
+                # archives unmapped (treated as standalone), so record why.
+                $errors.Add("Failed to read manifest '$($mf.Name)' for NAS chain map: $_")
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Failed to read manifest '$($mf.Name)' for NAS chain map: $_" -Level WARN -Context $InstanceName
+                }
+            }
+        }
+    }
+
     if (Test-Path -Path $ccFullDir -PathType Container) {
         try {
             # Get all full backup archives sorted by name (timestamp) descending
@@ -177,17 +200,7 @@ function Remove-SEBExpiredBackups {
                 # (archive base name -> chain_id) and keep an entire chain while ANY member is
                 # still within the retention window. Archives we cannot map (e.g. their manifest
                 # was already pruned) are treated as standalone and aged out individually.
-                $chainOf = @{}
-                if (Test-Path -Path $ccManifestDir -PathType Container) {
-                    foreach ($mf in (Get-ChildItem -Path $ccManifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-                        try {
-                            $mc = Get-Content -Path $mf.FullName -Raw | ConvertFrom-Json -AsHashtable
-                            if ($mc['chain_id']) { $chainOf[$mf.BaseName] = $mc['chain_id'] }
-                        }
-                        catch { }
-                    }
-                }
-
+                # $chainOf was built at the top of this function, BEFORE Tier 2 removed manifests.
                 $nasArchivesAll = Get-ChildItem -Path $nasInstanceDir -Recurse -File -ErrorAction SilentlyContinue
 
                 # Group by chain; unmapped archives become their own singleton "chain".

@@ -69,4 +69,25 @@ Describe 'Compare-ReconstructedState' {
         }
         finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    It 'normalizes backslash-keyed manifest paths (legacy/hand-edited manifests)' {
+        # Actual reconstructed paths are normalized to forward slashes; a manifest whose keys use
+        # backslashes must still line up, or every nested file is reported as both Missing and
+        # Extra and an otherwise-valid restore is wrongly aborted.
+        $dir = New-TestWorld -Files @{ 'Sandbox.sbc' = 'world'; 'sub/SANDBOX_0_0_0_.sbs' = 'sector' }
+        try {
+            $manifest = New-ManifestFor -Dir $dir
+            # Re-key the nested entry with a backslash separator, as a legacy manifest would store it.
+            $files = @{}
+            foreach ($k in $manifest.files.Keys) {
+                $files[$k.Replace('/', '\')] = $manifest.files[$k]
+            }
+            $backslashManifest = @{ files = $files }
+
+            $r = Compare-ReconstructedState -ReconstructedPath $dir -Manifest $backslashManifest
+            $r.IsValid | Should -BeTrue -Because "manifest keys must be normalized to match forward-slash actual paths"
+            $r.Mismatches.Count | Should -Be 0
+        }
+        finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }

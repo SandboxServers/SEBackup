@@ -34,6 +34,21 @@ Describe 'New-SEBVRageAuthHeaders' {
         $h.Date | Should -Be $script:date
     }
 
+    It 'matches a hardcoded canonical signature (locks the message format independently)' {
+        # An independently-pinned constant: for these fixed inputs the HMAC-SHA1 base64 signature
+        # is exactly this value. Unlike Get-ExpectedSignature (which mirrors the implementation),
+        # this fails if the canonical message format (field order, separators) ever changes.
+        # key = base64(UTF8('0123456789abcdef')); message = "$Uri`r`n$Nonce`r`n$Date`r`n".
+        $pinnedKey   = 'MDEyMzQ1Njc4OWFiY2RlZg=='
+        $pinnedUri   = '/vrageremote/v1/session/save'
+        $pinnedNonce = 'fixednonce123'
+        $pinnedDate  = 'Mon, 01 Jan 2024 00:00:00 GMT'
+        $pinnedSig   = 'TPcWHhBd6jwH6B/tye7F/X2/XqY='
+
+        $h = New-SEBVRageAuthHeaders -SecurityKey $pinnedKey -RequestUri $pinnedUri -Nonce $pinnedNonce -Date $pinnedDate
+        $h.Authorization | Should -Be "${pinnedNonce}:${pinnedSig}"
+    }
+
     It 'binds the signature to the URI (different endpoint -> different signature)' {
         $a = New-SEBVRageAuthHeaders -SecurityKey $script:key -RequestUri '/vrageremote/v1/session/save' -Nonce $script:nonce -Date $script:date
         $b = New-SEBVRageAuthHeaders -SecurityKey $script:key -RequestUri '/vrageremote/v1/server' -Nonce $script:nonce -Date $script:date

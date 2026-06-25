@@ -63,7 +63,11 @@ function Get-SEBRestorePoints {
         return @()
     }
 
+    # Exclude '_BAD' manifests: Invoke-SEBBackup renames the manifest/archive to '..._BAD.json' /
+    # '..._BAD.7z' when a backup fails integrity. Offering a known-corrupt backup as a restore
+    # point would let an operator deploy it over the live world.
     $manifestFiles = Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '_BAD\.json$' } |
         Sort-Object -Property Name -Descending
 
     if (-not $manifestFiles -or $manifestFiles.Count -eq 0) {

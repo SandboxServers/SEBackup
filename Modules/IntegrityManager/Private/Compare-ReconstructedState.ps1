@@ -54,7 +54,11 @@ function Compare-ReconstructedState {
         $expectedFiles = @{}
         if ($Manifest.files) {
             foreach ($relativePath in $Manifest.files.Keys) {
-                $expectedFiles[$relativePath] = $Manifest.files[$relativePath]
+                # Normalize manifest keys to forward slashes so they line up with the
+                # forward-slash actual paths below. Manifests from New-SEBManifest already use
+                # '/', but a legacy or hand-edited manifest with backslash keys would otherwise
+                # report every file as both Missing and Extra and fail an otherwise-valid restore.
+                $expectedFiles[$relativePath.Replace('\', '/')] = $Manifest.files[$relativePath]
             }
         }
 

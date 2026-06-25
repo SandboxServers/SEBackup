@@ -49,7 +49,7 @@ Describe 'Remove-SEBExpiredBackups NAS chain awareness' {
                 retention = @{ cc_full_count = 10; nas_retention_days = 30 }
             }
 
-            $r = Remove-SEBExpiredBackups -InstanceName $inst -GlobalConfig $config
+            Remove-SEBExpiredBackups -InstanceName $inst -GlobalConfig $config | Out-Null
 
             Test-Path -LiteralPath $fullArchive | Should -BeTrue -Because "its chain still has an incremental within the retention window"
             Test-Path -LiteralPath $incArchive  | Should -BeTrue -Because "the incremental is newer than the cutoff"

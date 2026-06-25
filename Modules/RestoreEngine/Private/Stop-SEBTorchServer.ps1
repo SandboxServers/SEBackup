@@ -170,7 +170,13 @@ function Stop-SEBTorchServer {
                         }
                         else { 'Torch.Server' }
 
-                        while ((Get-Date) -lt $deadline) {
+                        # Give the process-exit wait its OWN deadline. Reusing the outer $deadline
+                        # (already mostly consumed waiting for the API to drop) meant that if the API
+                        # only went unreachable near the end of the window, this loop never ran and
+                        # only the 3s settle applied -- robocopy could then overwrite the world dir
+                        # while Torch.Server still held file handles, corrupting the restore.
+                        $procDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                        while ((Get-Date) -lt $procDeadline) {
                             $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
                                 param($name)
                                 [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)

@@ -189,12 +189,18 @@ function Invoke-SEBRestore {
             }
 
             try {
+                # The restore already holds the per-instance lock (STEP 0) and owns the cached
+                # node session (STEP 1). Pass -SkipLock so the nested backup does not deadlock on
+                # the lock we hold, and -KeepSession so its finally does not Remove-SEBSession the
+                # session this restore keeps using for the (destructive) steps that follow.
                 $safetyResult = Invoke-SEBBackup `
                     -NodeName     $NodeName `
                     -InstanceName $InstanceName `
                     -ForceFull `
                     -SkipLoadCheck `
-                    -SkipNotify
+                    -SkipNotify `
+                    -SkipLock `
+                    -KeepSession
 
                 if ($safetyResult.Success) {
                     $result.SafetyBackupPath = $safetyResult.ArchiveFile
@@ -518,13 +524,14 @@ function Invoke-SEBRestore {
         # ====================================================================
         if ($globalConfig.notifications.enabled) {
             try {
-                Send-SEBBackupNotification -BackupResult ([PSCustomObject]@{
-                    Success      = $true
-                    InstanceName = $InstanceName
-                    NodeName     = $NodeName
-                    BackupType   = "RESTORE to $RestorePoint"
-                    Duration     = (Get-Date) - $overallStart
-                }) -GlobalConfig $globalConfig
+                # Use the restore notifier (honors the notifications.on_restore gate) and pass the
+                # now-mandatory -InstanceName. The previous call routed through the *backup*
+                # notifier without -InstanceName, so every successful restore threw a
+                # ParameterBindingException and silently sent nothing.
+                Send-SEBRestoreNotification `
+                    -InstanceName $InstanceName `
+                    -RestorePoint $RestorePoint `
+                    -GlobalConfig $globalConfig
             }
             catch {
                 $warnings.Add("Failed to send restore notification: $_")

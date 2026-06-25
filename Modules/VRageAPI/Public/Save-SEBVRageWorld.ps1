@@ -8,9 +8,12 @@ function Save-SEBVRageWorld {
         The save process follows these steps:
 
         1. Pings the server to verify API connectivity.
-        2. Sends a PATCH request to /session/save to trigger the save.
-        3. Polls the /session endpoint until the save completes or the timeout
-           is reached.
+        2. Sends a PATCH request to /session/save to trigger the save. The VRage
+           Remote API PATCH /session/save is synchronous -- it returns only after
+           the world has been written to disk -- so a successful (non-null)
+           response is the authoritative completion signal. (A prior version
+           polled GET /session for an 'IsSaving' field that endpoint never
+           returns, so the poll verified nothing.)
 
         This function never throws a terminating error. If the API is
         unreachable or the save fails, it returns an object with Success=$false
@@ -29,8 +32,11 @@ function Save-SEBVRageWorld {
         authentication.
 
     .PARAMETER TimeoutSeconds
-        The maximum number of seconds to wait for the save operation to
-        complete. Defaults to 120 seconds.
+        The HTTP timeout, in seconds, applied to the synchronous PATCH
+        /session/save request. A large world can take well over the default
+        30s request timeout to flush, so this is plumbed through as the request
+        timeout to avoid cutting off a save that is still in progress. Defaults
+        to 120 seconds.
 
     .EXAMPLE
         $result = Save-SEBVRageWorld -Hostname 'localhost' -Port 8080 -SecurityKey 'MyKey123'
@@ -91,9 +97,10 @@ function Save-SEBVRageWorld {
         }
     }
 
-    # Step 2: Trigger the save via PATCH
-    Write-Verbose "VRageAPI: Triggering world save on ${Hostname}:${Port}"
-    $saveResponse = Invoke-SEBVRageRequest @commonParams -Method PATCH -Endpoint 'session/save'
+    # Step 2: Trigger the save via PATCH. The PATCH is synchronous, so apply TimeoutSeconds as the
+    # request timeout -- a large world can take longer than the default 30s to flush to disk.
+    Write-Verbose "VRageAPI: Triggering world save on ${Hostname}:${Port} (timeout ${TimeoutSeconds}s)"
+    $saveResponse = Invoke-SEBVRageRequest @commonParams -Method PATCH -Endpoint 'session/save' -TimeoutSec $TimeoutSeconds
 
     if ($null -eq $saveResponse) {
         return [PSCustomObject]@{

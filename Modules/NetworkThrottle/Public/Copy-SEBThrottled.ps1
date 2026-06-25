@@ -139,10 +139,13 @@ function Copy-SEBThrottled {
                 if (Test-Path -Path $Source -PathType Leaf) {
                     # Robocopy's second argument is the destination DIRECTORY, not a file path.
                     # Passing a file path made robocopy create a directory by that name and copy
-                    # the file inside it. Split Destination into its directory and copy there.
+                    # the file inside it. Resolve the destination directory robustly: -Destination
+                    # may be a directory, a full file path, or a bare filename (GetDirectoryName
+                    # returns '' ) -- fall back to the current location so we never hand New-Item
+                    # or robocopy an empty path.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $destDir = [System.IO.Path]::GetDirectoryName($Destination)
+                    $destDir = Resolve-DestinationDirectory -Destination $Destination
                     if (-not (Test-Path -Path $destDir -PathType Container)) {
                         New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
                     }
@@ -168,7 +171,7 @@ function Copy-SEBThrottled {
                     # Robocopy's second argument is the destination DIRECTORY, not a file path.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $destDir = [System.IO.Path]::GetDirectoryName($Destination)
+                    $destDir = Resolve-DestinationDirectory -Destination $Destination
                     if (-not (Test-Path -Path $destDir -PathType Container)) {
                         New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
                     }
@@ -219,12 +222,26 @@ function Copy-SEBThrottled {
     # Destination filename differs, move it into place; then verify the file actually landed
     # (robocopy can report a success-ish exit code while leaving nothing at the expected path).
     if ($method -eq 'Robocopy' -and (Test-Path -Path $Source -PathType Leaf)) {
-        $landed = Join-Path -Path ([System.IO.Path]::GetDirectoryName($Destination)) -ChildPath ([System.IO.Path]::GetFileName($Source))
-        if ($landed -ne $Destination -and (Test-Path -Path $landed -PathType Leaf)) {
-            Move-Item -Path $landed -Destination $Destination -Force -ErrorAction Stop
+        # Resolve where robocopy actually placed the file (always <destDir>\<sourceName>) and the
+        # final expected path. When -Destination is a directory the file keeps its source name
+        # there; otherwise -Destination is the full target path and the landed file may need to
+        # be renamed into place.
+        $destDir = Resolve-DestinationDirectory -Destination $Destination
+        $expectedDest = if ((Test-Path -Path $Destination -PathType Container) -or
+            $Destination.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or
+            $Destination.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+            Join-Path -Path $destDir -ChildPath ([System.IO.Path]::GetFileName($Source))
         }
-        if (-not (Test-Path -Path $Destination -PathType Leaf)) {
-            throw "Throttled copy did not produce the destination file '$Destination'."
+        else {
+            $Destination
+        }
+
+        $landed = Join-Path -Path $destDir -ChildPath ([System.IO.Path]::GetFileName($Source))
+        if ($landed -ne $expectedDest -and (Test-Path -Path $landed -PathType Leaf)) {
+            Move-Item -Path $landed -Destination $expectedDest -Force -ErrorAction Stop
+        }
+        if (-not (Test-Path -Path $expectedDest -PathType Leaf)) {
+            throw "Throttled copy did not produce the destination file '$expectedDest'."
         }
     }
 

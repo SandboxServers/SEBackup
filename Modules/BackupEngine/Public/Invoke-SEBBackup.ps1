@@ -80,7 +80,19 @@ function Invoke-SEBBackup {
         [switch]$SkipLoadCheck,
 
         [Parameter()]
-        [switch]$SkipNotify
+        [switch]$SkipNotify,
+
+        # Skip acquiring the per-instance lock. For re-entrant callers (e.g. Invoke-SEBRestore's
+        # safety backup) that already hold the instance lock -- taking it again against the
+        # atomic CreateNew lock would fail and abort the nested backup.
+        [Parameter()]
+        [switch]$SkipLock,
+
+        # Do not tear down the node PSSession in the finally block. For callers that own the
+        # session lifecycle and keep using the (cached) session after this call returns;
+        # Remove-SEBSession would otherwise close the session out from under them.
+        [Parameter()]
+        [switch]$KeepSession
     )
 
     $overallStart = Get-Date
@@ -135,16 +147,21 @@ function Invoke-SEBBackup {
         }
 
         # ========================================================================
-        # STEP 3: Acquire lock file
+        # STEP 3: Acquire lock file (unless the caller already holds it)
         # ========================================================================
-        $lockResult = New-SEBLockFile -InstanceName $InstanceName
-        if (-not $lockResult.Acquired) {
-            throw "Could not acquire lock: $($lockResult.Reason)"
+        if (-not $SkipLock) {
+            $lockResult = New-SEBLockFile -InstanceName $InstanceName
+            if (-not $lockResult.Acquired) {
+                throw "Could not acquire lock: $($lockResult.Reason)"
+            }
+            $lockAcquired = $true
+            if ($lockResult.StaleLockBroken -and $hasLogger) {
+                Write-SEBLog -Message "Stale lock was broken for '$InstanceName'." -Level WARN -Context $InstanceName
+                $warnings.Add("Stale lock was broken before acquiring new lock.")
+            }
         }
-        $lockAcquired = $true
-        if ($lockResult.StaleLockBroken -and $hasLogger) {
-            Write-SEBLog -Message "Stale lock was broken for '$InstanceName'." -Level WARN -Context $InstanceName
-            $warnings.Add("Stale lock was broken before acquiring new lock.")
+        elseif ($hasLogger) {
+            Write-SEBLog -Message "Skipping lock acquisition (-SkipLock); caller already holds the lock for '$InstanceName'." -Level INFO -Context $InstanceName
         }
 
         # ========================================================================
@@ -294,7 +311,14 @@ function Invoke-SEBBackup {
         $compressionLevel = if ($globalConfig.compression.level_7zip) { [int]$globalConfig.compression.level_7zip } else { 5 }
         $resolvedEngine = $configEngine
         if ($resolvedEngine -eq 'auto') {
-            try { $resolvedEngine = Get-SEBCompressionEngine -Session $session }
+            # Get-SEBCompressionEngine returns a PSCustomObject (@{Engine;Version;Path}); take the
+            # .Engine name. Assigning the whole object made $compExt always choose '.zip' and made
+            # Compress-SEBArchive -Engine (a [ValidateSet] string) throw, failing every auto backup.
+            try {
+                $engineInfo = Get-SEBCompressionEngine -Session $session
+                $resolvedEngine = if ($engineInfo -is [string]) { $engineInfo } else { $engineInfo.Engine }
+                if ([string]::IsNullOrWhiteSpace($resolvedEngine)) { $resolvedEngine = 'dotnet' }
+            }
             catch { $resolvedEngine = 'dotnet' }
         }
         $compExt = if ($resolvedEngine -eq '7zip') { '.7z' } else { '.zip' }
@@ -650,6 +674,11 @@ function Invoke-SEBBackup {
         # ========================================================================
         # STEP 15: Notification
         # ========================================================================
+        # Finalize the result BEFORE notifying. Success/Warnings were still at their initial
+        # values here, so a successful backup was being reported as a failure with no warnings.
+        $result.Success = $integrityPassed
+        $result.Warnings = $warnings.ToArray()
+
         if (-not $SkipNotify -and $globalConfig.notifications.enabled) {
             try {
                 Send-SEBBackupNotification -InstanceName $InstanceName -BackupResult $result -GlobalConfig $globalConfig
@@ -745,8 +774,9 @@ function Invoke-SEBBackup {
         }
 
         # The session is created per backup; close it so sessions do not accumulate
-        # across scheduled runs.
-        if ($null -ne $session) {
+        # across scheduled runs. A re-entrant caller (-KeepSession) owns the session's
+        # lifecycle and keeps using it after we return, so do not tear it down here.
+        if ($null -ne $session -and -not $KeepSession) {
             Remove-SEBSession -NodeName $NodeName | Out-Null
         }
     }
