@@ -236,11 +236,16 @@ function Copy-SEBThrottled {
             $Destination
         }
 
+        # Compare fully-resolved paths: for a bare destination like 'backup.zip', $expectedDest is
+        # relative while $landed is rooted via $destDir, so a string compare could try to move the
+        # file onto itself. Use -LiteralPath so names with [ ] are not treated as wildcards.
         $landed = Join-Path -Path $destDir -ChildPath ([System.IO.Path]::GetFileName($Source))
-        if ($landed -ne $expectedDest -and (Test-Path -Path $landed -PathType Leaf)) {
-            Move-Item -Path $landed -Destination $expectedDest -Force -ErrorAction Stop
+        $landedFull = [System.IO.Path]::GetFullPath($landed)
+        $expectedFull = [System.IO.Path]::GetFullPath($expectedDest)
+        if ($landedFull -ne $expectedFull -and (Test-Path -LiteralPath $landed -PathType Leaf)) {
+            Move-Item -LiteralPath $landed -Destination $expectedDest -Force -ErrorAction Stop
         }
-        if (-not (Test-Path -Path $expectedDest -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $expectedDest -PathType Leaf)) {
             throw "Throttled copy did not produce the destination file '$expectedDest'."
         }
     }

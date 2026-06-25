@@ -235,13 +235,25 @@ function Test-SEBChainIntegrity {
                     Copy-Item -Path $file.FullName -Destination $destPath -Force -ErrorAction Stop
                 }
 
-                # Process deleted files from the incremental manifest
+                # Process deleted files from the incremental manifest. deleted_files is manifest
+                # data, so an entry like '..\..\target' could escape $tempDir after Join-Path and
+                # let Remove-Item delete outside the reconstruction workspace. Constrain every
+                # removal to the temp root.
                 $deletedFiles = $incManifest.deleted_files
                 if ($deletedFiles -and $deletedFiles.Count -gt 0) {
+                    $tempRoot = [System.IO.Path]::GetFullPath($tempDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
                     foreach ($deletedFile in $deletedFiles) {
-                        $deletedPath = Join-Path -Path $tempDir -ChildPath $deletedFile
-                        if (Test-Path -Path $deletedPath) {
-                            Remove-Item -Path $deletedPath -Force -ErrorAction SilentlyContinue
+                        if ([string]::IsNullOrWhiteSpace($deletedFile) -or [System.IO.Path]::IsPathRooted($deletedFile)) {
+                            Write-Verbose "IntegrityManager: skipping unsafe deleted_files entry '$deletedFile'."
+                            continue
+                        }
+                        $deletedPath = [System.IO.Path]::GetFullPath((Join-Path -Path $tempDir -ChildPath $deletedFile))
+                        if (-not $deletedPath.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            Write-Verbose "IntegrityManager: deleted_files entry '$deletedFile' escapes the reconstruction root; skipping."
+                            continue
+                        }
+                        if (Test-Path -LiteralPath $deletedPath) {
+                            Remove-Item -LiteralPath $deletedPath -Force -ErrorAction SilentlyContinue
                         }
                     }
                 }

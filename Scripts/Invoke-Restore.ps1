@@ -193,6 +193,11 @@ try {
                 $restorePoints.Add([PSCustomObject]@{
                     Index        = $index
                     PointId      = $pointId
+                    # The exact manifest filename (incl. extension). Invoke-SEBRestore ->
+                    # Test-SEBRestoreChain resolves -RestorePoint as a filename in the manifests
+                    # dir without appending an extension, so the call site must pass this, not the
+                    # extension-stripped PointId.
+                    ManifestName = $mf.Name
                     Date         = $timestamp.ToString('yyyy-MM-dd HH:mm:ss')
                     Type         = $backupType
                     Files        = $fileCount
@@ -213,6 +218,7 @@ try {
             $restorePoints.Add([PSCustomObject]@{
                 Index        = $restorePoints.Count + 1
                 PointId      = $af.BaseName
+                ManifestName = $af.Name
                 Date         = $af.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
                 Type         = 'Archive'
                 Files        = 0
@@ -392,10 +398,13 @@ try {
     Write-Host "  Source: $($selectedPoint.ManifestPath)" -ForegroundColor DarkGray
 
     if (Get-Command -Name 'Invoke-SEBRestore' -ErrorAction SilentlyContinue) {
+        # Pass the full manifest filename (incl. extension). Test-SEBRestoreChain resolves
+        # -RestorePoint as a filename in the manifests dir without appending an extension, so the
+        # extension-stripped PointId would point at a non-existent file and fail chain validation.
         $restoreResult = Invoke-SEBRestore `
             -NodeName $NodeName `
             -InstanceName $InstanceName `
-            -RestorePoint $selectedPoint.PointId
+            -RestorePoint $selectedPoint.ManifestName
 
         if ($restoreResult -and $restoreResult.Success) {
             $restoreSuccess = $true

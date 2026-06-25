@@ -38,7 +38,10 @@ function Deploy-SEBRestoredFiles {
     .OUTPUTS
         PSCustomObject
         An object with: Deployed (bool), PreRestorePath (string),
-        FilesCopied (int), ErrorMessage (string).
+        FilesCopied (int), RolledBack (nullable bool), ErrorMessage (string).
+        RolledBack is $true/$false when a deploy failure triggered a rollback
+        attempt (so callers can distinguish an automatic rollback from a world
+        left needing manual recovery), and $null when no rollback was attempted.
     #>
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
@@ -193,6 +196,7 @@ function Deploy-SEBRestoredFiles {
             Deployed       = $deployResult.Deployed
             PreRestorePath = $deployResult.PreRestorePath
             FilesCopied    = $deployResult.FilesCopied
+            RolledBack     = $deployResult.RolledBack
             ErrorMessage   = $deployResult.Error
         }
     }
@@ -205,6 +209,7 @@ function Deploy-SEBRestoredFiles {
             Deployed       = $false
             PreRestorePath = $null
             FilesCopied    = 0
+            RolledBack     = $null
             ErrorMessage   = "Deployment exception: $_"
         }
     }

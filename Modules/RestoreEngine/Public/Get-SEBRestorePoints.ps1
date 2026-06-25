@@ -67,7 +67,7 @@ function Get-SEBRestorePoints {
     # '..._BAD.7z' when a backup fails integrity. Offering a known-corrupt backup as a restore
     # point would let an operator deploy it over the live world.
     $manifestFiles = Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch '_BAD\.json$' } |
+        Where-Object { $_.Name -notmatch '_BAD\.' } |
         Sort-Object -Property Name -Descending
 
     if (-not $manifestFiles -or $manifestFiles.Count -eq 0) {
@@ -109,7 +109,7 @@ function Get-SEBRestorePoints {
 
         if (Test-Path -Path $searchDir -PathType Container) {
             $candidates = Get-ChildItem -Path $searchDir -Filter "${baseName}.*" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch '\.json$' }
+                Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' }
             if ($candidates) {
                 $archiveItem = $candidates | Select-Object -First 1
                 $archiveFile = $archiveItem.FullName
@@ -156,7 +156,7 @@ function Get-SEBRestorePoints {
 
                         if (Test-Path -Path $memberSearchDir -PathType Container) {
                             $memberArchives = Get-ChildItem -Path $memberSearchDir -Filter "${memberBaseName}.*" -File -ErrorAction SilentlyContinue |
-                                Where-Object { $_.Name -notmatch '\.json$' }
+                                Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' }
                             if (-not $memberArchives) {
                                 $chainValid = $false
                                 break

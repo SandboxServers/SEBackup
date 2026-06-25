@@ -30,6 +30,12 @@ function Resolve-DestinationDirectory {
     if ((Test-Path -Path $Destination -PathType Container) -or
         $Destination.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or
         $Destination.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+        # Preserve a drive/UNC root as-is: TrimEnd would turn 'C:\' into 'C:' (the *current*
+        # directory on that drive), silently redirecting the copy.
+        $root = [System.IO.Path]::GetPathRoot($Destination)
+        if ($Destination -eq $root) {
+            return $Destination
+        }
         return $Destination.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     }
 

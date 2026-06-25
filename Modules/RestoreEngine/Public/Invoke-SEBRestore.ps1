@@ -209,46 +209,24 @@ function Invoke-SEBRestore {
                     }
                 }
                 else {
-                    $warnings.Add("Safety backup completed with issues: $($safetyResult.ErrorMessage)")
-                    if ($hasLogger) {
-                        Write-SEBLog -Message "Safety backup had issues: $($safetyResult.ErrorMessage)" -Level WARN -Context $InstanceName
-                    }
+                    # The safety backup is the only recovery point if the restore goes wrong, so a
+                    # failure must abort BEFORE the live world is touched. -SkipSafetyBackup is the
+                    # explicit opt-out for anyone who really wants to proceed without one.
+                    throw "Safety backup failed: $($safetyResult.ErrorMessage). Aborting restore so the current world keeps a recovery point. Re-run with -SkipSafetyBackup to bypass."
                 }
             }
             catch {
-                $warnings.Add("Safety backup failed: $_. Proceeding with restore anyway.")
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Safety backup failed: $_. Proceeding." -Level WARN -Context $InstanceName
-                }
+                throw "Safety backup failed; aborting restore before any live world changes: $($_.Exception.Message). Re-run with -SkipSafetyBackup to bypass."
             }
         }
         else {
             $warnings.Add("Safety backup was skipped (SkipSafetyBackup specified).")
         }
 
-        # ====================================================================
-        # STEP 5: Stop Torch server
-        # ====================================================================
-        if ($hasLogger) {
-            Write-SEBLog -Message "Stopping Torch server..." -Level INFO -Context $InstanceName
-        }
-
-        $stopResult = Stop-SEBTorchServer `
-            -Session        $session `
-            -InstanceConfig $instanceConfig `
-            -NodeConfig     $nodeConfig
-
-        if (-not $stopResult.Stopped) {
-            if ($stopResult.Method -eq 'manual') {
-                $warnings.Add("Server must be stopped manually: $($stopResult.ErrorMessage)")
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Manual server stop required. Proceeding assuming server is stopped." -Level WARN -Context $InstanceName
-                }
-            }
-            else {
-                throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
-            }
-        }
+        # NOTE: stopping the Torch server is deferred until AFTER reconstruction is verified
+        # (STEP 7b below). Reconstruction and verification happen in a temp dir and don't need the
+        # server down; stopping first meant a failed verification left the world intact but the
+        # server offline. Stop only once we know we have a good reconstruction to deploy.
 
         # ====================================================================
         # STEP 6: Reconstruct in temp working directory
@@ -465,6 +443,32 @@ function Invoke-SEBRestore {
         else {
             if ($hasLogger) {
                 Write-SEBLog -Message "Reconstruction verified: $($verifyResult.Checked)/$($verifyResult.Total) files match." -Level INFO -Context $InstanceName
+            }
+        }
+
+        # ====================================================================
+        # STEP 7b: Stop Torch server (deferred from STEP 5)
+        # Only now -- with a verified reconstruction ready to deploy -- do we take the server
+        # down. If anything above failed/aborted, the server was never stopped.
+        # ====================================================================
+        if ($hasLogger) {
+            Write-SEBLog -Message "Stopping Torch server..." -Level INFO -Context $InstanceName
+        }
+
+        $stopResult = Stop-SEBTorchServer `
+            -Session        $session `
+            -InstanceConfig $instanceConfig `
+            -NodeConfig     $nodeConfig
+
+        if (-not $stopResult.Stopped) {
+            if ($stopResult.Method -eq 'manual') {
+                $warnings.Add("Server must be stopped manually: $($stopResult.ErrorMessage)")
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Manual server stop required. Proceeding assuming server is stopped." -Level WARN -Context $InstanceName
+                }
+            }
+            else {
+                throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
             }
         }
 

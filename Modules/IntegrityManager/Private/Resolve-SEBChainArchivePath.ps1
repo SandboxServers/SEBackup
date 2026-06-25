@@ -59,9 +59,14 @@ function Resolve-SEBChainArchivePath {
         return $null
     }
 
-    # archive_path must be a bare filename. Reject separators, traversal, and rooted paths.
+    # archive_path must be a bare filename. Reject separators, traversal, rooted paths, and also
+    # wildcards / invalid filename chars: a value like '*.7z' passes the leaf/separator checks but
+    # Test-Path -Path would treat it as a pattern and could match an unintended archive.
     $leaf = Split-Path -Path $name -Leaf
-    if ($name -ne $leaf -or $name -match '[\\/]' -or $name.Contains('..') -or [System.IO.Path]::IsPathRooted($name)) {
+    $hasWildcard = $name -match '[\*\?\[\]]'
+    $hasInvalidFileNameChar = ($name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0)
+    if ($name -ne $leaf -or $name -match '[\\/]' -or $name.Contains('..') -or
+        [System.IO.Path]::IsPathRooted($name) -or $hasWildcard -or $hasInvalidFileNameChar) {
         Write-Verbose "Resolve-SEBChainArchivePath: rejecting unsafe archive_path '$name'."
         return $null
     }

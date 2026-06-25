@@ -93,16 +93,31 @@ function Invoke-SEBVRageRequest {
         [int]$TimeoutSec = 30
     )
 
-    # Build the full API URL and the absolute path that the signature is bound to.
-    $requestPath = "/vrageremote/v1/${Endpoint}"
+    # Build the full API URL and the absolute path that the signature is bound to. Normalize the
+    # endpoint so callers can pass 'session/save', '/session/save', or an already-prefixed
+    # '/vrageremote/v1/session/save' without double-prefixing (which would break the signed path).
+    $normalizedEndpoint = $Endpoint.TrimStart('/')
+    if ($normalizedEndpoint.StartsWith('vrageremote/v1/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $requestPath = "/$normalizedEndpoint"
+    }
+    else {
+        $requestPath = "/vrageremote/v1/$normalizedEndpoint"
+    }
     $url = "http://${Hostname}:${Port}${requestPath}"
 
     # Generate HMAC-SHA1 authentication headers (signature is bound to the request path).
-    $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey -RequestUri $requestPath
-
-    $headers = @{
-        'Date'          = $authHeaders.Date
-        'Authorization' = $authHeaders.Authorization
+    # New-SEBVRageAuthHeaders throws on an invalid (non-Base64) key; keep that inside the graceful
+    # path so a misconfigured key returns $null like other request failures rather than throwing.
+    try {
+        $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey -RequestUri $requestPath
+        $headers = @{
+            'Date'          = $authHeaders.Date
+            'Authorization' = $authHeaders.Authorization
+        }
+    }
+    catch {
+        Write-Warning "VRageAPI: Failed to generate authentication headers for ${Hostname}:${Port}/${Endpoint} - $($_.Exception.Message)"
+        return $null
     }
 
     # Build the request parameters

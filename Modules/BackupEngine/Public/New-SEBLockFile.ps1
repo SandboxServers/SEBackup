@@ -53,6 +53,21 @@ function New-SEBLockFile {
         [int]$StaleThresholdHours = 4
     )
 
+    # InstanceName becomes a filename segment ("<InstanceName>.lock"). Reject path separators,
+    # traversal, rooted paths, wildcards, and other invalid filename characters so a crafted or
+    # mistyped instance name cannot escape Data/lockfiles or be treated as a wildcard.
+    if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or
+        [System.IO.Path]::IsPathRooted($InstanceName) -or
+        $InstanceName -match '[\*\?\[\]]' -or
+        $InstanceName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        return [PSCustomObject]@{
+            Acquired        = $false
+            LockFilePath    = $null
+            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, wildcards, and invalid filename characters are not allowed."
+            StaleLockBroken = $false
+        }
+    }
+
     $projectRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
     $lockDir = Join-Path -Path $projectRoot -ChildPath 'Data' -AdditionalChildPath 'lockfiles'
     $lockFilePath = Join-Path -Path $lockDir -ChildPath "${InstanceName}.lock"

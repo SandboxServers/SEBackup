@@ -405,7 +405,7 @@ function Invoke-SEBBackup {
 
             $changedFiles = @($manifestDiff.Added) + @($manifestDiff.Modified)
             if ($changedFiles.Count -eq 0) {
-                $warnings.Add("No file changes detected since last backup. Incremental archive will contain only the manifest.")
+                $warnings.Add("No file changes detected since last backup. The incremental archive will be empty (the manifest is stored separately in the manifests directory).")
                 if ($hasLogger) {
                     Write-SEBLog -Message "No changes detected. Creating minimal incremental backup." -Level INFO -Context $InstanceName
                 }
@@ -529,45 +529,9 @@ function Invoke-SEBBackup {
         }
 
         # ========================================================================
-        # STEP 12: Copy to NAS (warn if unreachable, don't abort)
-        # ========================================================================
-        $nasPath = $globalConfig.storage.nas_backup_path
-        if (-not [string]::IsNullOrWhiteSpace($nasPath)) {
-            try {
-                $nasInstanceDir = Join-Path -Path $nasPath -ChildPath $InstanceName
-                $nasTypeDir = Join-Path -Path $nasInstanceDir -ChildPath $backupType
-
-                if (-not (Test-Path -Path $nasTypeDir -PathType Container)) {
-                    New-Item -Path $nasTypeDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-                }
-
-                $nasArchivePath = Join-Path -Path $nasTypeDir -ChildPath $archiveFileName
-
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Copying archive to NAS: $nasArchivePath" -Level INFO -Context $InstanceName
-                }
-
-                Copy-SEBThrottled `
-                    -Source           $ccArchivePath `
-                    -Destination      $nasArchivePath `
-                    -MaxBandwidthMbps $netBandwidthMbps `
-                    -RobocopyIpgMs    $netRobocopyIpgMs
-
-                if ($hasLogger) {
-                    Write-SEBLog -Message "NAS copy completed." -Level INFO -Context $InstanceName
-                }
-            }
-            catch {
-                $nasWarn = "Failed to copy archive to NAS: $_"
-                $warnings.Add($nasWarn)
-                if ($hasLogger) {
-                    Write-SEBLog -Message $nasWarn -Level WARN -Context $InstanceName
-                }
-            }
-        }
-
-        # ========================================================================
         # STEP 13: Integrity checks (Level 1 + Level 2)
+        # NOTE: the NAS copy was intentionally moved to AFTER these checks (STEP 12b below) so a
+        # corrupt archive that fails integrity is never published to NAS under its normal name.
         # ========================================================================
         $integrityPassed = $true
 
@@ -643,6 +607,46 @@ function Invoke-SEBBackup {
                 }
                 catch {
                     $warnings.Add("Failed to rename failed manifest to BAD: $_")
+                }
+            }
+        }
+
+        # ========================================================================
+        # STEP 12b: Copy to NAS -- ONLY after integrity passes (warn if unreachable, don't abort)
+        # Running this after the integrity checks keeps a corrupt archive (which is renamed _BAD
+        # above) from ever being published to NAS under its normal, restore-selectable name.
+        # ========================================================================
+        $nasPath = $globalConfig.storage.nas_backup_path
+        if ($integrityPassed -and -not [string]::IsNullOrWhiteSpace($nasPath)) {
+            try {
+                $nasInstanceDir = Join-Path -Path $nasPath -ChildPath $InstanceName
+                $nasTypeDir = Join-Path -Path $nasInstanceDir -ChildPath $backupType
+
+                if (-not (Test-Path -Path $nasTypeDir -PathType Container)) {
+                    New-Item -Path $nasTypeDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                }
+
+                $nasArchivePath = Join-Path -Path $nasTypeDir -ChildPath $archiveFileName
+
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Copying archive to NAS: $nasArchivePath" -Level INFO -Context $InstanceName
+                }
+
+                Copy-SEBThrottled `
+                    -Source           $ccArchivePath `
+                    -Destination      $nasArchivePath `
+                    -MaxBandwidthMbps $netBandwidthMbps `
+                    -RobocopyIpgMs    $netRobocopyIpgMs
+
+                if ($hasLogger) {
+                    Write-SEBLog -Message "NAS copy completed." -Level INFO -Context $InstanceName
+                }
+            }
+            catch {
+                $nasWarn = "Failed to copy archive to NAS: $_"
+                $warnings.Add($nasWarn)
+                if ($hasLogger) {
+                    Write-SEBLog -Message $nasWarn -Level WARN -Context $InstanceName
                 }
             }
         }

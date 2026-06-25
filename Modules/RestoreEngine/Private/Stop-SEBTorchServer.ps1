@@ -176,13 +176,29 @@ function Stop-SEBTorchServer {
                         # only the 3s settle applied -- robocopy could then overwrite the world dir
                         # while Torch.Server still held file handles, corrupting the restore.
                         $procDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                        $processExited = $false
                         while ((Get-Date) -lt $procDeadline) {
                             $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
                                 param($name)
                                 [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)
                             } -ArgumentList $procName -ErrorAction SilentlyContinue
-                            if (-not $stillRunning) { break }
+                            if (-not $stillRunning) { $processExited = $true; break }
                             Start-Sleep -Seconds 2
+                        }
+
+                        # If the process is STILL running, do not claim success: deploying over the
+                        # world dir while Torch.Server holds file handles corrupts the restore. The
+                        # caller treats a non-stopped result as fatal (unless run_mode is manual).
+                        if (-not $processExited) {
+                            $warnMsg = "VRage API stopped responding, but process '$procName' was still running after ${TimeoutSeconds}s. Refusing to proceed (deploying now could corrupt the world)."
+                            if ($hasLogger) {
+                                Write-SEBLog -Message $warnMsg -Level ERROR -Context $instanceName
+                            }
+                            return [PSCustomObject]@{
+                                Stopped      = $false
+                                Method       = 'console_api'
+                                ErrorMessage = $warnMsg
+                            }
                         }
 
                         # Settle to let the OS release any lingering file handles.
