@@ -11,11 +11,9 @@ BeforeAll {
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
     Import-Module "$repoRoot/SEBackup.psd1" -Force -DisableNameChecking 3>$null
 
-    # Build a manifest 'files' entry the way New-SEBManifest records it.
-    function New-FileEntry {
-        param([long]$Size, [string]$Sha256, [string]$LastWrite = '2026-01-01T00:00:00.0000000Z')
-        @{ size = $Size; sha256 = $Sha256; last_write = $LastWrite }
-    }
+    # New-FileEntry (the shared manifest 'files' entry factory) lives in one place so it cannot
+    # drift between this suite and New-SEBManifest.Tests.ps1.
+    . "$PSScriptRoot/_ManifestTestHelpers.ps1"
 
     # Wrap a files hashtable in a minimal v2 manifest shell.
     function New-ManifestFromFiles {

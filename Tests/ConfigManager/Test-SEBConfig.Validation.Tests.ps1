@@ -295,13 +295,28 @@ Describe 'Test-SEBConfig -Type Instance (edge cases)' {
         ($result.Errors -join ' ') | Should -Match 'share_name'
     }
 
-    It 'errors when [vrage_api].port is out of range' {
+    It 'errors when [vrage_api].port is above the upper bound' {
         $cfg = @{
             instance   = @{ name = 'X'; display_name = 'X' }
             world_path = 'C:\W\Saves\X'
             staging_path = 'D:\stage\X'
             share_name = 'SEBackup_X$'
             vrage_api  = @{ port = 99999; security_key = 'k' }
+        }
+        $result = Test-SEBConfig -Type Instance -Config $cfg
+        $result.IsValid | Should -BeFalse
+        ($result.Errors -join ' ') | Should -Match 'port'
+    }
+
+    It 'errors when [vrage_api].port is below the lower bound (port = 0)' {
+        # Symmetric with the upper-bound case above (and with the Global port lower-bound test):
+        # the Instance validator rejects port < 1 just as it rejects port > 65535.
+        $cfg = @{
+            instance   = @{ name = 'X'; display_name = 'X' }
+            world_path = 'C:\W\Saves\X'
+            staging_path = 'D:\stage\X'
+            share_name = 'SEBackup_X$'
+            vrage_api  = @{ port = 0; security_key = 'k' }
         }
         $result = Test-SEBConfig -Type Instance -Config $cfg
         $result.IsValid | Should -BeFalse

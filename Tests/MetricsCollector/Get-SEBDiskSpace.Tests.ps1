@@ -90,13 +90,19 @@ Describe 'Get-SEBDiskSpace' {
         }
 
         It 'coerces the remote drive figures to [long]' {
+            # The remote query returns NATIVE [int] figures (a fresh node runspace types small
+            # integers as Int32). The source casts them to [long]; this asserts that cast is
+            # load-bearing -- drop the [long] in Get-SEBDiskSpace.ps1 and the -BeOfType [long]
+            # below goes red, because the values would stay [int]. (A literal like 12345678901,
+            # which PowerShell already types as Int64, could NOT catch a missing cast.)
             Mock Invoke-SEBRemoteCommand -ModuleName MetricsCollector {
-                @{ FreeBytes = 12345678901; TotalBytes = 98765432109 }
+                @{ FreeBytes = [int]100; TotalBytes = [int]200 }
             }
             $r = Get-SEBDiskSpace -BackupRoot $script:localPath -Session $script:fakeSession
             $r.NodeStagingFreeBytes  | Should -BeOfType [long]
             $r.NodeStagingTotalBytes | Should -BeOfType [long]
-            $r.NodeStagingFreeBytes  | Should -Be 12345678901
+            $r.NodeStagingFreeBytes  | Should -Be 100
+            $r.NodeStagingTotalBytes | Should -Be 200
         }
     }
 
