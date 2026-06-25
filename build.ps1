@@ -17,7 +17,7 @@
          on GitHub-hosted runners.
 
 .PARAMETER InstallDeps
-    Install/zupdate the required modules (PSToml, Pester, PSScriptAnalyzer) from PSGallery
+    Install/update the required modules (PSToml, Pester, PSScriptAnalyzer) from PSGallery
     before running. CI passes this; locally, omit it if you already have them.
 
 .PARAMETER ExcludeTag
@@ -42,18 +42,31 @@ $failed = $false
 
 if ($InstallDeps) {
     Write-Host '== Installing dependencies =='
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-    $deps = @(
-        @{ Name = 'PSToml';           MinimumVersion = '0.4.0' }
-        @{ Name = 'Pester';           MinimumVersion = '5.5.0' }
-        @{ Name = 'PSScriptAnalyzer'; MinimumVersion = '1.22.0' }
-    )
-    foreach ($d in $deps) {
-        $have = Get-Module -ListAvailable -Name $d.Name |
-            Where-Object { $_.Version -ge [version]$d.MinimumVersion }
-        if (-not $have) {
+    # Trust PSGallery only for the duration of this run, then restore the prior policy so we
+    # don't permanently lower trust on a developer machine.
+    $priorPolicy = (Get-PSRepository -Name PSGallery).InstallationPolicy
+    try {
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        $deps = @(
+            @{ Name = 'PSToml';           MinimumVersion = '0.4.0' }
+            @{ Name = 'Pester';           MinimumVersion = '5.5.0' }
+            @{ Name = 'PSScriptAnalyzer'; MinimumVersion = '1.22.0' }
+        )
+        foreach ($d in $deps) {
+            $have = Get-Module -ListAvailable -Name $d.Name |
+                Where-Object { $_.Version -ge [version]$d.MinimumVersion }
+            if ($have) { continue }
             Write-Host "Installing $($d.Name) >= $($d.MinimumVersion)"
-            Install-Module @d -Force -Scope CurrentUser -AllowClobber -SkipPublisherCheck
+            # -SkipPublisherCheck is needed ONLY for Pester: Windows ships an in-box Pester signed
+            # by Microsoft, while the PSGallery build is signed by the Pester team, so a plain
+            # install trips the publisher-mismatch guard. The other modules don't need it.
+            $extra = if ($d.Name -eq 'Pester') { @{ SkipPublisherCheck = $true } } else { @{} }
+            Install-Module @d @extra -Force -Scope CurrentUser -AllowClobber
+        }
+    }
+    finally {
+        if ($priorPolicy -and $priorPolicy -ne 'Trusted') {
+            Set-PSRepository -Name PSGallery -InstallationPolicy $priorPolicy
         }
     }
 }
@@ -65,18 +78,20 @@ Import-Module Pester -MinimumVersion 5.5.0 -Force
 Write-Host ''
 Write-Host '== PSScriptAnalyzer (Error severity) =='
 
-# Documented baseline of accepted Error findings, keyed "RuleName|FileLeaf". Any Error NOT
-# listed here fails the build, so the rule stays active everywhere else and new regressions
-# are caught. Shrink this list as findings are remediated.
+# Documented baseline of accepted Error findings, keyed "RuleName|relative/path|line". Keying by
+# path AND line (not just the file leaf) keeps the "any new Error fails" guarantee even for a
+# second occurrence of the same rule inside a baseline file. Any Error NOT listed here fails the
+# build. If a baseline finding's line shifts, update the entry. Shrink this list as findings are fixed.
 $pssaBaseline = @(
     # Setup-Node.ps1 converts a plaintext password to a SecureString to create the node
     # service account (New-LocalUser) over PSRemoting. Hardening tracked under issue #30.
-    'PSAvoidUsingConvertToSecureStringWithPlainText|Setup-Node.ps1'
+    'PSAvoidUsingConvertToSecureStringWithPlainText|Scripts/Setup-Node.ps1|224'
 )
 
 $pssa = @(Invoke-ScriptAnalyzer -Path $RepoRoot -Recurse -Severity Error -ErrorAction SilentlyContinue)
 $newErrors = @($pssa | Where-Object {
-        "$($_.RuleName)|$(Split-Path $_.ScriptPath -Leaf)" -notin $pssaBaseline
+        $rel = [System.IO.Path]::GetRelativePath($RepoRoot, $_.ScriptPath).Replace('\', '/')
+        "$($_.RuleName)|$rel|$($_.Line)" -notin $pssaBaseline
     })
 
 if ($pssa.Count) {
