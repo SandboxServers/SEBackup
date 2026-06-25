@@ -141,8 +141,14 @@ function Get-SEBAllInstanceConfigs {
             continue
         }
 
-        # Convert PSObject to hashtable if remoting deserialized it
-        if ($instanceConfig -isnot [hashtable]) {
+        # Convert PSObject to hashtable if remoting deserialized it. A shallow "-isnot [hashtable]"
+        # guard is insufficient: the per-instance Config payload can arrive as a top-level
+        # [hashtable] whose NESTED tables are still OrderedDictionary/PSCustomObject (PSToml on the
+        # node + remoting). That would skip conversion, so ConvertTo-CanonicalInstanceConfig's
+        # "-is [hashtable]" section checks would miss legacy tables and Merge-ConfigOverrides (which
+        # only recurses when BOTH sides are [hashtable]) would fail to deep-merge. Test-IsHashtableTree
+        # inspects the whole tree, so we convert unless every dictionary descendant is a hashtable.
+        if (-not (Test-IsHashtableTree -InputObject $instanceConfig)) {
             $instanceConfig = Convert-PSObjectToHashtable -InputObject $instanceConfig
         }
 

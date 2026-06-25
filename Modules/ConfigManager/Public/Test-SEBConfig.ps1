@@ -404,12 +404,29 @@ function Test-InstanceConfig {
     }
 
     # --- staging_path (top-level, optional; defaults to C:\SEBackup\staging) ---
-    # Warn whenever the canonical top-level staging_path is absent, the same way world_path and
+    # When ABSENT, warn (the engine substitutes its default), the same way world_path and
     # share_name surface a migration nudge. (A legacy [paths].staging_local is promoted to
     # staging_path by the shim, so when only the legacy key existed, staging_path is now present
     # and this warning correctly stays silent; it fires only when nothing supplied a value.)
+    #
+    # When PRESENT, it is consumed verbatim by the engine -- Test-SEBPreFlight and Invoke-SEBBackup
+    # feed it straight into Split-Path / Join-Path. An empty/whitespace value or a non-absolute path
+    # (including a drive-RELATIVE one like "C:stage", which Split-Path/Join-Path resolve against the
+    # process CWD and would silently misplace the staging tree) is therefore an ERROR, not a warning.
+    # [System.IO.Path]::IsPathFullyQualified accepts real drive paths ("C:\...") and UNC shares
+    # ("\\srv\share\...") while rejecting "", relative, root-relative ("/x"), and drive-relative
+    # ("C:x") inputs -- exactly the absolute-path contract the engine needs.
     if (-not $Config.ContainsKey('staging_path')) {
         $Warnings.Add("'staging_path' is not set. The engine will default to 'C:\\SEBackup\\staging'.")
+    }
+    else {
+        $stagingPath = $Config['staging_path']
+        if ($stagingPath -isnot [string] -or [string]::IsNullOrWhiteSpace($stagingPath)) {
+            $Errors.Add("'staging_path' is set but empty. Remove the key to use the engine default ('C:\\SEBackup\\staging') or give it an absolute path -- the engine feeds it directly to Split-Path/Join-Path.")
+        }
+        elseif (-not [System.IO.Path]::IsPathFullyQualified($stagingPath)) {
+            $Errors.Add("'staging_path' must be an absolute path (e.g. 'D:\\SEBackup\\staging\\<instance>' or a UNC share). Got: $stagingPath")
+        }
     }
     if ($hasLegacyStaging) {
         $Warnings.Add("Staging path found under legacy [paths].staging_local. Re-register this instance (or move it to a top-level 'staging_path') so it matches the current schema.")

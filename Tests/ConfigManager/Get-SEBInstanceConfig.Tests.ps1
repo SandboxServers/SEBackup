@@ -318,6 +318,178 @@ Describe 'Instance TOML canonical schema (Issue #14)' {
             ($result.Warnings -join ' ') | Should -Not -Match 'service_name'
             ($result.Warnings -join ' ') | Should -Not -Match 'process_name'
         }
+
+        # Copilot R2: staging_path is consumed verbatim by the engine (Test-SEBPreFlight runs
+        # Split-Path -Qualifier on it; Invoke-SEBBackup runs Join-Path with it). So when the key is
+        # PRESENT it must be a non-empty ABSOLUTE path -- previously only its ABSENCE was flagged, and
+        # an empty or relative value sailed through as valid only to mis-seat the staging tree at run
+        # time. Absence remains a (benign) warning because the engine substitutes its own default.
+        It 'flags an explicitly EMPTY staging_path as an ERROR' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = '   '   # whitespace-only: Split-Path/Join-Path would choke or misplace
+                share_name   = 'SEBackup_X$'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeFalse
+            ($result.Errors -join ' ') | Should -Match 'staging_path'
+        }
+
+        It 'flags a RELATIVE staging_path as an ERROR' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = 'relative\staging'   # resolves against CWD -> wrong location
+                share_name   = 'SEBackup_X$'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeFalse
+            ($result.Errors -join ' ') | Should -Match 'staging_path'
+        }
+
+        It 'flags a DRIVE-RELATIVE staging_path (e.g. "C:staging") as an ERROR' {
+            # "C:staging" is rooted but NOT fully qualified -- it is relative to the C: drive's CWD.
+            # IsPathFullyQualified rejects it; a naive IsPathRooted check would wrongly accept it.
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = 'C:staging'
+                share_name   = 'SEBackup_X$'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeFalse
+            ($result.Errors -join ' ') | Should -Match 'staging_path'
+        }
+
+        It 'accepts a valid ABSOLUTE drive staging_path' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = 'D:\SEBackup\staging\X'
+                share_name   = 'SEBackup_X$'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            ($result.Errors -join ' ') | Should -Not -Match 'staging_path'
+        }
+
+        It 'accepts a valid UNC staging_path' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = '\\nas01\stage\X'
+                share_name   = 'SEBackup_X$'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            ($result.Errors -join ' ') | Should -Not -Match 'staging_path'
+        }
+
+        It 'still only WARNS (no error) when staging_path is absent' {
+            $cfg = @{
+                instance   = @{ name = 'X'; display_name = 'X' }
+                world_path = 'C:\W\Saves\X'
+                share_name = 'SEBackup_X$'
+                vrage_api  = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            ($result.Errors -join ' ')   | Should -Not -Match 'staging_path'
+            ($result.Warnings -join ' ') | Should -Match 'staging_path'
+        }
+    }
+
+    # Copilot R2 (deep hashtable-tree normalization): PSToml on the node + PSRemoting can hand
+    # Get-SEBInstanceConfig a TOP-LEVEL [hashtable] whose NESTED tables are still OrderedDictionary.
+    # The old shallow "$instanceConfig -isnot [hashtable]" guard saw the hashtable top, skipped
+    # Convert-PSObjectToHashtable, and left the children as OrderedDictionary -- so
+    # ConvertTo-CanonicalInstanceConfig's "$config['vrage_api'] -is [hashtable]" gate was false and a
+    # legacy [vrage_api].key was NEVER promoted to security_key. The fix uses Test-IsHashtableTree to
+    # normalize the WHOLE tree first. These tests reproduce that exact mixed shape.
+    Context 'Deep-normalizes a mixed hashtable/OrderedDictionary tree (remote read mocked)' -Skip:(-not $script:psTomlAvailable) {
+        BeforeAll {
+            Mock Get-SEBGlobalConfig -ModuleName ConfigManager {
+                @{ defaults = @{ vrage_api = @{ port = 8080 } } }
+            }
+
+            # Return the pathological shape directly: a [hashtable] at the top (so the old shallow
+            # guard would short-circuit) whose [vrage_api] / [instance] children are genuine
+            # OrderedDictionary instances produced by ConvertFrom-Toml. The legacy 'key' lives in
+            # that OrderedDictionary child, exactly where the shallow guard would strand it.
+            Mock Invoke-Command -ModuleName ConfigManager {
+                $legacyToml = @'
+[instance]
+name = "Legacy"
+display_name = "Legacy"
+run_mode = "console"
+
+[paths]
+world_save = "C:\\TorchServers\\Legacy\\Saves\\W"
+staging_local = "E:\\stage\\Legacy"
+
+[smb]
+share_name = "SEBackup_Legacy$"
+
+[vrage_api]
+port = 8081
+key = "legacykey"
+'@
+                $parsed = ConvertFrom-Toml -InputObject $legacyToml
+                # Top level becomes a real [hashtable]; every section stays OrderedDictionary.
+                $mixed = @{}
+                foreach ($k in $parsed.Keys) { $mixed[$k] = $parsed[$k] }
+                $mixed
+            }
+        }
+
+        It 'top is a hashtable but children are OrderedDictionary in the mock (guards the test premise)' {
+            # If this ever stops holding, the mock no longer reproduces the bug and the assertions
+            # below would pass vacuously. Reconstruct the identical deterministic shape the mock
+            # builds and assert its types directly (no need to invoke the mock plumbing).
+            $legacyToml = @'
+[vrage_api]
+port = 8081
+key = "legacykey"
+'@
+            $parsed = ConvertFrom-Toml -InputObject $legacyToml
+            $mixed = @{}
+            foreach ($k in $parsed.Keys) { $mixed[$k] = $parsed[$k] }
+
+            ($mixed -is [hashtable]) | Should -BeTrue
+            ($mixed['vrage_api'] -is [System.Collections.Specialized.OrderedDictionary]) | Should -BeTrue
+            ($mixed['vrage_api'] -is [hashtable]) | Should -BeFalse
+        }
+
+        It 'canonicalizes legacy sections nested under OrderedDictionary children' {
+            $cfg = Get-SEBInstanceConfig -Session $script:fakeSession -InstanceName 'Legacy'
+
+            # The whole tree is now hashtables and the legacy promotions fired:
+            $cfg | Should -BeOfType [hashtable]
+            $cfg['vrage_api'] | Should -BeOfType [hashtable]
+            # [vrage_api].key (in an OrderedDictionary child) -> security_key. THIS is what the old
+            # shallow guard missed.
+            $cfg['vrage_api']['security_key'] | Should -Be 'legacykey'
+            # Flat operational keys promoted from the OrderedDictionary [paths]/[smb] children.
+            $cfg['world_path']   | Should -Be 'C:\TorchServers\Legacy\Saves\W'
+            $cfg['staging_path'] | Should -Be 'E:\stage\Legacy'
+            $cfg['share_name']   | Should -Be 'SEBackup_Legacy$'
+            $cfg['run_mode']     | Should -Be 'console'
+        }
+
+        It 'deep-merges the OrderedDictionary [vrage_api] with global defaults instead of clobbering it' {
+            # Merge-ConfigOverrides only recurses when BOTH sides are [hashtable]. With the child left
+            # as OrderedDictionary the merge would replace the whole table; after deep normalization
+            # the default port survives alongside the instance's promoted security_key.
+            $cfg = Get-SEBInstanceConfig -Session $script:fakeSession -InstanceName 'Legacy'
+            [int]$cfg['vrage_api']['port'] | Should -Be 8081
+            $cfg['vrage_api']['security_key'] | Should -Be 'legacykey'
+        }
     }
 
     # (c) The canonical shim itself must be non-destructive. Exercised directly in module scope

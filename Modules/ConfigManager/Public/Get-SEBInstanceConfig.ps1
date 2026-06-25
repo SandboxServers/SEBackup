@@ -91,7 +91,14 @@ function Get-SEBInstanceConfig {
     # [hashtable], and remoting can hand it back as a PSCustomObject or a dictionary depending on
     # the transport -- Convert-PSObjectToHashtable normalizes all of those shapes to a hashtable so
     # the downstream Merge-ConfigOverrides (which requires [hashtable]) binds cleanly.
-    if ($instanceConfig -isnot [hashtable]) {
+    #
+    # A SHALLOW "-isnot [hashtable]" guard is not enough: remoting/PSToml can hand back a top-level
+    # [hashtable] whose NESTED tables are still OrderedDictionary/PSCustomObject. That would skip
+    # conversion here, leaving ConvertTo-CanonicalInstanceConfig's "-is [hashtable]" section checks
+    # to miss legacy [paths]/[smb]/[vrage_api] tables and Merge-ConfigOverrides (which only recurses
+    # when BOTH sides are [hashtable]) to clobber instead of deep-merge them. Test-IsHashtableTree
+    # walks the whole tree, so we normalize unless EVERY dictionary descendant is already a hashtable.
+    if (-not (Test-IsHashtableTree -InputObject $instanceConfig)) {
         $instanceConfig = Convert-PSObjectToHashtable -InputObject $instanceConfig
     }
 
