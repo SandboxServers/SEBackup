@@ -42,6 +42,14 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
 $failed = $false
 
+# Pinned toolchain versions — single source of truth for BOTH install and import, so the runner
+# never drifts between what it installs and what it loads. Bump these deliberately.
+$PinnedModules = [ordered]@{
+    PSToml           = '0.5.0'
+    Pester           = '5.7.1'
+    PSScriptAnalyzer = '1.25.0'
+}
+
 if ($InstallDeps) {
     Write-Host '== Installing dependencies =='
     # Trust PSGallery only for the duration of this run, then restore the prior policy so we
@@ -49,23 +57,18 @@ if ($InstallDeps) {
     $priorPolicy = (Get-PSRepository -Name PSGallery).InstallationPolicy
     try {
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-        # Pin EXACT versions for a reproducible, supply-chain-resistant toolchain (no "latest at
-        # run time"). Bump these deliberately.
-        $deps = @(
-            @{ Name = 'PSToml';           RequiredVersion = '0.5.0' }
-            @{ Name = 'Pester';           RequiredVersion = '5.7.1' }
-            @{ Name = 'PSScriptAnalyzer'; RequiredVersion = '1.25.0' }
-        )
-        foreach ($d in $deps) {
-            $have = Get-Module -ListAvailable -Name $d.Name |
-                Where-Object { $_.Version -eq [version]$d.RequiredVersion }
+        # Install the EXACT pinned versions (no "latest at run time" — supply-chain hardening).
+        foreach ($name in $PinnedModules.Keys) {
+            $version = $PinnedModules[$name]
+            $have = Get-Module -ListAvailable -Name $name |
+                Where-Object { $_.Version -eq [version]$version }
             if ($have) { continue }
-            Write-Host "Installing $($d.Name) $($d.RequiredVersion)"
+            Write-Host "Installing $name $version"
             # -SkipPublisherCheck is scoped to Pester ONLY: Windows ships an in-box Pester signed
             # by Microsoft, while the PSGallery build is signed by the Pester team, so a plain
             # install trips the publisher-mismatch guard. PSToml/PSScriptAnalyzer verify normally.
-            $extra = if ($d.Name -eq 'Pester') { @{ SkipPublisherCheck = $true } } else { @{} }
-            Install-Module -Name $d.Name -RequiredVersion $d.RequiredVersion `
+            $extra = if ($name -eq 'Pester') { @{ SkipPublisherCheck = $true } } else { @{} }
+            Install-Module -Name $name -RequiredVersion $version `
                 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber @extra
         }
     }
@@ -76,8 +79,10 @@ if ($InstallDeps) {
     }
 }
 
-Import-Module PSScriptAnalyzer -MinimumVersion 1.22.0 -Force
-Import-Module Pester -MinimumVersion 5.5.0 -Force
+# Import the EXACT pinned versions (not -MinimumVersion) so a runner's preinstalled copy can't
+# shadow the pinned one -- keeps "what ran" identical to "what was installed".
+Import-Module PSScriptAnalyzer -RequiredVersion $PinnedModules.PSScriptAnalyzer -Force
+Import-Module Pester -RequiredVersion $PinnedModules.Pester -Force
 
 # ── Gate 1: PSScriptAnalyzer (Error + ParseError) ────────────────────────────
 Write-Host ''
@@ -106,7 +111,7 @@ if ($pssa.Count) {
         Out-String -Width 200 | Write-Host
 }
 if ($newErrors.Count) {
-    Write-Host "FAIL: $($newErrors.Count) new PSScriptAnalyzer Error finding(s) not in baseline."
+    Write-Host "FAIL: $($newErrors.Count) new PSScriptAnalyzer Error/ParseError finding(s) not in baseline."
     $failed = $true
 }
 else {
