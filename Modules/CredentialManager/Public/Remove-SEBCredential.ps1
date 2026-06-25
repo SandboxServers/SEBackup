@@ -69,7 +69,9 @@ function Remove-SEBCredential {
 
     try {
         # ShouldProcess already handled confirmation above, so suppress any nested prompt.
-        Remove-Item -Path $credentialFile -Force -Confirm:$false -ErrorAction Stop
+        # -LiteralPath: $credentialFile is a resolved path, not a pattern -- avoid wildcard
+        # expansion if the node name ever resolves to a path containing [ or ].
+        Remove-Item -LiteralPath $credentialFile -Force -Confirm:$false -ErrorAction Stop
         Write-Verbose "Credential removed for node '$NodeName': $credentialFile"
     }
     catch {

@@ -55,7 +55,7 @@ Describe 'Remove-SEBCredential' {
             Test-Path -LiteralPath $script:credFile | Should -BeFalse
         }
 
-        It '-What:$false takes precedence over an ambient $WhatIfPreference and deletes' {
+        It '-WhatIf:$false takes precedence over an ambient $WhatIfPreference and deletes' {
             # Even if the session globally requested -WhatIf, an explicit -Force must delete.
             Remove-SEBCredential -NodeName $script:testNode -Force -WhatIf:$false
             Test-Path -LiteralPath $script:credFile | Should -BeFalse
