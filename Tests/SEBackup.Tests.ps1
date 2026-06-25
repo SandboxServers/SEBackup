@@ -7,12 +7,18 @@
     Tests module import, function existence, and core logic that does not
     require remote connections or Windows-specific services.
 
+    Data-driven cases use Pester 5's -ForEach so the per-item value is bound into
+    the run-phase scope as $_. The previous `foreach ($x) { It "...$x" {...$x...} }`
+    pattern registered the It blocks at discovery but left $x $null at run time
+    (discovery and run are separate scopes), so every generated test asserted
+    against a null path/name and failed.
+
 .EXAMPLE
     Invoke-Pester -Path Tests/SEBackup.Tests.ps1 -Output Detailed
 #>
 
 BeforeAll {
-    # Resolve project root (one level up from Tests/)
+    # Resolve project root (one level up from Tests/). Available to run-phase It bodies.
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
     # Import individual sub-modules directly for testing.
@@ -48,34 +54,26 @@ Describe 'SEBackup Root Module' {
     }
 
     Context 'All expected sub-module directories exist' {
-        $expectedModules = @(
+        It 'Module directory exists: <_>' -ForEach @(
             'Logger', 'ConfigManager', 'CredentialManager', 'RemoteManager',
             'VRageAPI', 'VSSManager', 'ManifestManager', 'CompressionManager',
             'IntegrityManager', 'LoadMonitor', 'NetworkThrottle', 'NotificationManager',
             'MetricsCollector', 'BackupEngine', 'RestoreEngine', 'SchedulerManager'
-        )
-
-        foreach ($mod in $expectedModules) {
-            It "Module directory exists: $mod" {
-                $modDir = Join-Path $ModulesPath $mod
-                Test-Path $modDir -PathType Container | Should -BeTrue
-            }
+        ) {
+            $modDir = Join-Path $ModulesPath $_
+            Test-Path $modDir -PathType Container | Should -BeTrue
         }
     }
 
     Context 'All expected sub-module psm1 files exist' {
-        $modulesWithPsm1 = @(
+        It 'Module file exists: <_>.psm1' -ForEach @(
             'Logger', 'ConfigManager', 'CredentialManager', 'RemoteManager',
             'VRageAPI', 'VSSManager', 'ManifestManager', 'CompressionManager',
             'IntegrityManager', 'LoadMonitor', 'NetworkThrottle', 'NotificationManager',
-            'BackupEngine', 'SchedulerManager'
-        )
-
-        foreach ($mod in $modulesWithPsm1) {
-            It "Module file exists: $mod.psm1" {
-                $modPath = Join-Path $ModulesPath "$mod\$mod.psm1"
-                Test-Path $modPath -PathType Leaf | Should -BeTrue
-            }
+            'MetricsCollector', 'BackupEngine', 'RestoreEngine', 'SchedulerManager'
+        ) {
+            $modPath = Join-Path $ModulesPath "$_\$_.psm1"
+            Test-Path $modPath -PathType Leaf | Should -BeTrue
         }
     }
 }
@@ -89,16 +87,12 @@ Describe 'Logger Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Write-SEBLog', 'Get-SEBLogPath', 'Get-SEBLogEntries',
             'Start-SEBLogContext', 'Stop-SEBLogContext'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module Logger -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module Logger -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 
@@ -168,33 +162,45 @@ Describe 'Logger Module' {
 }
 
 Describe 'ConfigManager Module' {
-    BeforeAll {
-        # ConfigManager requires PSToml
-        $psTomlAvailable = $null -ne (Get-Module -Name PSToml -ListAvailable -ErrorAction SilentlyContinue)
+    # -Skip on the Contexts below is evaluated at DISCOVERY, so the availability flag
+    # must be computed in BeforeDiscovery (a BeforeAll value would still be $null at
+    # discovery and the contexts would always skip).
+    BeforeDiscovery {
+        # Script-scoped so the discovery-time flag reliably survives the BeforeDiscovery block
+        # and is visible to the -Skip: expressions below (also evaluated at discovery).
+        $script:psTomlAvailable = $null -ne (Get-Module -Name PSToml -ListAvailable -ErrorAction SilentlyContinue)
+        # In CI, PSToml MUST be present: a silent skip would weaken the merge gate (the
+        # ConfigManager tests would simply vanish from the count). Fail loudly instead.
+        # $env:CI is a string, so test for an explicit truthy value -- a bare `if ($env:CI)`
+        # is true even for CI="false".
+        if (-not $script:psTomlAvailable -and ($env:CI -match '^(true|1)$')) {
+            throw 'PSToml is not installed. Install it before running the gate suite in CI (Install-Module PSToml -Force).'
+        }
     }
 
-    Context 'Module functions exist' -Skip:(-not $psTomlAvailable) {
-        BeforeAll {
-            $configMgrPath = Join-Path $ModulesPath 'ConfigManager\ConfigManager.psm1'
-            if (Test-Path $configMgrPath) {
-                Import-Module $configMgrPath -Force -DisableNameChecking
-            }
+    BeforeAll {
+        # Import at the Describe level so BOTH contexts below have ConfigManager available,
+        # including when a single context/test is run in isolation (filtered run) -- a
+        # context-scoped import would leave 'Global config loading' without Get-SEBGlobalConfig.
+        $configMgrPath = Join-Path $ModulesPath 'ConfigManager\ConfigManager.psm1'
+        if (Test-Path $configMgrPath) {
+            Import-Module $configMgrPath -Force -DisableNameChecking
         }
+    }
 
-        $expectedFunctions = @(
+    Context 'Module functions exist' -Skip:(-not $script:psTomlAvailable) {
+        It 'Function exists: <_>' -ForEach @(
             'Get-SEBGlobalConfig', 'Get-SEBNodeConfig', 'Get-SEBInstanceConfig',
             'Get-SEBAllInstanceConfigs', 'Test-SEBConfig'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            # Qualify with -Module so a same-named command from another module cannot make
+            # this pass when ConfigManager itself failed to import.
+            Get-Command -Name $_ -Module ConfigManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 
-    Context 'Global config loading' -Skip:(-not $psTomlAvailable) {
+    Context 'Global config loading' -Skip:(-not $script:psTomlAvailable) {
         It 'Get-SEBGlobalConfig returns a hashtable with expected sections' {
             $config = Get-SEBGlobalConfig -Force
             $config | Should -Not -BeNullOrEmpty
@@ -228,16 +234,12 @@ Describe 'ManifestManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'New-SEBManifest', 'Compare-SEBManifest', 'Get-SEBManifestChain',
             'Read-SEBManifest', 'Write-SEBManifest', 'Get-SEBLatestManifest'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module ManifestManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module ManifestManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 
@@ -397,16 +399,12 @@ Describe 'VRageAPI Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Invoke-SEBVRageRequest', 'Save-SEBVRageWorld',
             'Test-SEBVRageAPI', 'Get-SEBServerInfo'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module VRageAPI -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module VRageAPI -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 
@@ -480,16 +478,12 @@ Describe 'CompressionManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Compress-SEBArchive', 'Expand-SEBArchive', 'Test-SEBArchive',
             'Get-SEBArchiveContents', 'Get-SEBCompressionEngine'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module CompressionManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module CompressionManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -503,17 +497,13 @@ Describe 'IntegrityManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Test-SEBArchiveIntegrity', 'Test-SEBManifestIntegrity',
             'Test-SEBChainIntegrity', 'Get-SEBIntegrityReport',
             'Write-SEBIntegrityReport'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module IntegrityManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module IntegrityManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -532,17 +522,15 @@ Describe 'RemoteManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'New-SEBSession', 'Remove-SEBSession', 'Test-SEBConnection',
             'Invoke-SEBRemoteCommand', 'Get-SEBSharePath', 'Test-SEBShare',
             'Mount-SEBShare'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            # Qualify with -Module so a same-named command from another loaded module
+            # cannot make this assert pass when RemoteManager itself failed to import.
+            Get-Command -Name $_ -Module RemoteManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -556,16 +544,12 @@ Describe 'CredentialManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Save-SEBCredential', 'Get-SEBCredential',
             'Remove-SEBCredential', 'Test-SEBCredential'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module CredentialManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module CredentialManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -579,17 +563,13 @@ Describe 'VSSManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'New-SEBShadowCopy', 'Remove-SEBShadowCopy',
             'Mount-SEBShadowCopy', 'Dismount-SEBShadowCopy',
             'Invoke-SEBWithShadowCopy', 'Clear-SEBOrphanShadowCopies'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module VSSManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module VSSManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -603,16 +583,12 @@ Describe 'NetworkThrottle Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Copy-SEBThrottled', 'Start-SEBBitsTransfer',
             'Get-SEBTransferStatus', 'Stop-SEBTransfer'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module NetworkThrottle -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+        ) {
+            Get-Command -Name $_ -Module NetworkThrottle -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -626,16 +602,13 @@ Describe 'BackupEngine Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Invoke-SEBBackup', 'Invoke-SEBBackupAll',
-            'Get-SEBBackupHistory', 'Remove-SEBExpiredBackups'
-        )
-
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module BackupEngine -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
-            }
+            'Get-SEBBackupHistory', 'Remove-SEBExpiredBackups',
+            'New-SEBLockFile', 'Remove-SEBLockFile'
+        ) {
+            Get-Command -Name $_ -Module BackupEngine -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
@@ -649,16 +622,57 @@ Describe 'SchedulerManager Module' {
     }
 
     Context 'Exported functions exist' {
-        $expectedFunctions = @(
+        It 'Function exists: <_>' -ForEach @(
             'Register-SEBScheduledTask', 'Unregister-SEBScheduledTask',
             'Get-SEBScheduleStatus', 'Update-SEBSchedule'
-        )
+        ) {
+            Get-Command -Name $_ -Module SchedulerManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
+        }
+    }
+}
 
-        foreach ($fn in $expectedFunctions) {
-            It "Function exists: $fn" {
-                Get-Command -Name $fn -Module SchedulerManager -ErrorAction SilentlyContinue |
-                    Should -Not -BeNullOrEmpty
+Describe 'MetricsCollector Module' {
+    BeforeAll {
+        $metricsPath = Join-Path $ModulesPath 'MetricsCollector\MetricsCollector.psm1'
+        if (Test-Path $metricsPath) {
+            Import-Module $metricsPath -Force -DisableNameChecking
+        }
+    }
+
+    Context 'Exported functions exist' {
+        It 'Function exists: <_>' -ForEach @(
+            'Add-SEBMetric', 'Get-SEBMetrics', 'Get-SEBDiskSpace',
+            'Get-SEBHealthSummary', 'Clear-SEBOldMetrics'
+        ) {
+            Get-Command -Name $_ -Module MetricsCollector -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'RestoreEngine Module' {
+    BeforeAll {
+        $restorePath = Join-Path $ModulesPath 'RestoreEngine\RestoreEngine.psm1'
+        if (Test-Path $restorePath) {
+            # RestoreEngine depends on several sibling modules; import them so it loads cleanly.
+            foreach ($dep in 'Logger', 'ConfigManager', 'CredentialManager', 'RemoteManager',
+                'VRageAPI', 'CompressionManager', 'IntegrityManager', 'ManifestManager',
+                'NetworkThrottle', 'NotificationManager', 'BackupEngine') {
+                $depPath = Join-Path $ModulesPath "$dep\$dep.psm1"
+                if (Test-Path $depPath) { Import-Module $depPath -Force -DisableNameChecking }
             }
+            Import-Module $restorePath -Force -DisableNameChecking
+        }
+    }
+
+    Context 'Exported functions exist' {
+        It 'Function exists: <_>' -ForEach @(
+            'Invoke-SEBRestore', 'Get-SEBRestorePoints',
+            'Test-SEBRestoreChain', 'Undo-SEBRestore'
+        ) {
+            Get-Command -Name $_ -Module RestoreEngine -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
         }
     }
 }
