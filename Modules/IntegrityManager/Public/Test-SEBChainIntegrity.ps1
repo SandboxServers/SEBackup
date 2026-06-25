@@ -52,6 +52,7 @@ function Test-SEBChainIntegrity {
         Test-SEBManifestIntegrity
     #>
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNullOrEmpty()]
@@ -66,6 +67,9 @@ function Test-SEBChainIntegrity {
     )
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # Resolve the optional structured logger once; the module works with or without it.
+    $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
 
     $result = [PSCustomObject]@{
         Level               = 3
@@ -91,7 +95,7 @@ function Test-SEBChainIntegrity {
 
         Write-Verbose "IntegrityManager: Level 3 chain integrity check for instance '$InstanceName'"
 
-        if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+        if ($hasLogger) {
             Write-SEBLog -Message "Level 3 chain integrity check: instance=$InstanceName, chain=$ChainId" -Level INFO -Context 'Integrity'
         }
 
@@ -99,51 +103,22 @@ function Test-SEBChainIntegrity {
         # Get-SEBManifestChain walks parent_manifest links backwards from a TARGET manifest;
         # its real signature is mandatory -InstanceName, -TargetManifest, -BackupRoot. It has
         # NO -ChainId parameter. So translate this function's optional -ChainId into a concrete
-        # target manifest filename before calling it:
-        #   - No -ChainId: use the latest manifest for the instance (any type).
-        #   - With -ChainId: use the latest manifest belonging to that chain (highest
-        #     chain_sequence, tie-broken by timestamp), preserving the -ChainId behaviour
-        #     advertised by this function while honouring the real downstream signature.
+        # target manifest filename before calling it. Get-SEBLatestManifest owns the
+        # manifest-directory scan for both cases:
+        #   - No -ChainId: it returns the latest manifest for the instance (any type).
+        #   - With -ChainId: it returns the head of that chain (highest chain_sequence,
+        #     tie-broken by timestamp), preserving the -ChainId behaviour advertised here
+        #     while honouring the real downstream signature.
         $targetManifest = $null
 
-        if ([string]::IsNullOrWhiteSpace($ChainId)) {
-            $latest = Get-SEBLatestManifest -InstanceName $InstanceName -BackupRoot $BackupRoot
-            if ($latest) {
-                $targetManifest = $latest['_source_filename']
-            }
+        $latest = if ([string]::IsNullOrWhiteSpace($ChainId)) {
+            Get-SEBLatestManifest -InstanceName $InstanceName -BackupRoot $BackupRoot
         }
         else {
-            # Find the head (highest chain_sequence) of the requested chain by scanning the
-            # instance's manifest directory. We resolve the directory the same way the
-            # ManifestManager functions do: <BackupRoot>/<InstanceName>/manifests.
-            $manifestDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName | Join-Path -ChildPath 'manifests'
-            if (Test-Path -Path $manifestDir -PathType Container) {
-                $headManifest = $null
-                $headSequence = -1
-                $headTimestamp = [datetime]::MinValue
-                foreach ($file in (Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-                    try {
-                        $candidate = Read-SEBManifest -Path $file.FullName
-                    }
-                    catch {
-                        Write-Verbose "IntegrityManager: skipping unreadable manifest '$($file.Name)': $_"
-                        continue
-                    }
-                    if ($candidate['chain_id'] -ne $ChainId) { continue }
-
-                    $seq = try { [int]$candidate['chain_sequence'] } catch { -1 }
-                    $ts = try { [datetime]::Parse($candidate['timestamp']) } catch { [datetime]::MinValue }
-
-                    if ($seq -gt $headSequence -or ($seq -eq $headSequence -and $ts -gt $headTimestamp)) {
-                        $headSequence = $seq
-                        $headTimestamp = $ts
-                        $headManifest = $candidate
-                    }
-                }
-                if ($headManifest) {
-                    $targetManifest = $headManifest['_source_filename']
-                }
-            }
+            Get-SEBLatestManifest -InstanceName $InstanceName -BackupRoot $BackupRoot -ChainId $ChainId
+        }
+        if ($latest) {
+            $targetManifest = $latest['_source_filename']
         }
 
         if ([string]::IsNullOrWhiteSpace($targetManifest)) {
@@ -228,7 +203,7 @@ function Test-SEBChainIntegrity {
         if (-not $allArchivesPassed) {
             $result.ErrorMessage = "One or more archives failed Level 1/Level 2 checks."
 
-            if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+            if ($hasLogger) {
                 Write-SEBLog -Message "Level 3 aborted: archive-level checks failed for instance '$InstanceName'" -Level ERROR -Context 'Integrity'
             }
 
@@ -253,7 +228,7 @@ function Test-SEBChainIntegrity {
         # an array.
         Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir | Out-Null
 
-        if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+        if ($hasLogger) {
             Write-SEBLog -Message "Extracted full backup: $fullArchivePath" -Level DEBUG -Context 'Integrity'
         }
 
@@ -276,18 +251,35 @@ function Test-SEBChainIntegrity {
                 # Discard the descriptor object so it does not leak into the result pipeline.
                 Expand-SEBArchive -ArchivePath $incArchivePath -DestinationPath $stagingDir | Out-Null
 
-                # Copy modified and new files from staging to reconstruction
+                # Copy modified and new files from staging to reconstruction. Get-ChildItem -Recurse
+                # follows directory symlinks/junctions, so a crafted archive could surface files from
+                # outside $stagingDir and -- after Join-Path -- write them outside $tempDir. Anchor the
+                # relative path to the resolved staging root and constrain every destination to the
+                # resolved temp root, mirroring the deleted_files containment below.
+                $stagingRoot = [System.IO.Path]::GetFullPath($stagingDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+                $tempRoot = [System.IO.Path]::GetFullPath($tempDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
                 $stagingFiles = Get-ChildItem -Path $stagingDir -Recurse -File
                 foreach ($file in $stagingFiles) {
-                    $relativePath = $file.FullName.Substring($stagingDir.Length).TrimStart('\', '/')
-                    $destPath = Join-Path -Path $tempDir -ChildPath $relativePath
-                    $destDir = [System.IO.Path]::GetDirectoryName($destPath)
+                    $fullSource = [System.IO.Path]::GetFullPath($file.FullName)
+                    if (-not $fullSource.StartsWith($stagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        Write-Verbose "IntegrityManager: staged file '$($file.FullName)' escapes the staging root; skipping."
+                        continue
+                    }
 
+                    $relativePath = $fullSource.Substring($stagingRoot.Length)
+                    $destPath = Join-Path -Path $tempDir -ChildPath $relativePath
+                    $fullDest = [System.IO.Path]::GetFullPath($destPath)
+                    if (-not $fullDest.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        Write-Verbose "IntegrityManager: staged file destination '$destPath' escapes the reconstruction root; skipping."
+                        continue
+                    }
+
+                    $destDir = [System.IO.Path]::GetDirectoryName($fullDest)
                     if (-not (Test-Path -Path $destDir -PathType Container)) {
                         New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
                     }
 
-                    Copy-Item -Path $file.FullName -Destination $destPath -Force -ErrorAction Stop
+                    Copy-Item -LiteralPath $file.FullName -Destination $fullDest -Force -ErrorAction Stop
                 }
 
                 # Process deleted files from the incremental manifest. deleted_files is manifest
@@ -296,7 +288,7 @@ function Test-SEBChainIntegrity {
                 # removal to the temp root.
                 $deletedFiles = $incManifest.deleted_files
                 if ($deletedFiles -and $deletedFiles.Count -gt 0) {
-                    $tempRoot = [System.IO.Path]::GetFullPath($tempDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+                    # $tempRoot was resolved with the copy loop above (same try-scope, always runs).
                     foreach ($deletedFile in $deletedFiles) {
                         if ([string]::IsNullOrWhiteSpace($deletedFile) -or [System.IO.Path]::IsPathRooted($deletedFile)) {
                             Write-Verbose "IntegrityManager: skipping unsafe deleted_files entry '$deletedFile'."
@@ -313,7 +305,7 @@ function Test-SEBChainIntegrity {
                     }
                 }
 
-                if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+                if ($hasLogger) {
                     Write-SEBLog -Message "Applied incremental $i`: $incArchivePath" -Level DEBUG -Context 'Integrity'
                 }
             }
@@ -335,7 +327,7 @@ function Test-SEBChainIntegrity {
             $result.Passed = $true
             Write-Verbose "IntegrityManager: Level 3 PASSED -- chain reconstruction verified"
 
-            if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+            if ($hasLogger) {
                 Write-SEBLog -Message "Level 3 PASSED: instance=$InstanceName, chain=$($result.ChainId), length=$($chain.Count)" -Level INFO -Context 'Integrity'
             }
         }
@@ -343,7 +335,7 @@ function Test-SEBChainIntegrity {
             $result.ErrorMessage = "Reconstruction verification failed: $($reconstructionResult.ErrorMessage)"
             Write-Verbose "IntegrityManager: Level 3 FAILED -- reconstruction does not match final manifest"
 
-            if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+            if ($hasLogger) {
                 Write-SEBLog -Message "Level 3 FAILED: reconstruction mismatch for instance '$InstanceName'" -Level ERROR -Context 'Integrity'
             }
         }
@@ -351,7 +343,7 @@ function Test-SEBChainIntegrity {
     catch {
         $result.ErrorMessage = "Level 3 check error: $_"
 
-        if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
+        if ($hasLogger) {
             Write-SEBLog -Message "Level 3 check error for instance '$InstanceName': $_" -Level ERROR -Context 'Integrity'
         }
     }

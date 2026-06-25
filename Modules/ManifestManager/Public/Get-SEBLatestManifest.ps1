@@ -6,8 +6,12 @@ function Get-SEBLatestManifest {
     .DESCRIPTION
         Searches the manifest directory for the specified instance under the backup
         root, looking for JSON manifest files. Reads all manifests, optionally filters
-        by type (full or incremental), and returns the one with the most recent
-        timestamp.
+        by type (full or incremental) and/or chain id, and returns the most recent
+        match.
+
+        When -ChainId is supplied the search is restricted to that chain and the head
+        of the chain is returned (highest chain_sequence, ties broken by the most
+        recent timestamp). Otherwise the latest manifest is chosen purely by timestamp.
 
         The manifest directory is expected at:
         {BackupRoot}\{InstanceName}\manifests\
@@ -26,6 +30,11 @@ function Get-SEBLatestManifest {
         "incremental" to return only the latest incremental. When omitted, returns
         the latest manifest of any type.
 
+    .PARAMETER ChainId
+        Optional filter restricting the search to a single backup chain. When supplied,
+        only manifests whose chain_id matches are considered and the head of that chain
+        is returned (highest chain_sequence, ties broken by timestamp).
+
     .EXAMPLE
         $latest = Get-SEBLatestManifest -InstanceName "Survival01" -BackupRoot "D:\Backups"
         if ($null -eq $latest) {
@@ -34,6 +43,9 @@ function Get-SEBLatestManifest {
 
     .EXAMPLE
         $latestFull = Get-SEBLatestManifest -InstanceName "Survival01" -BackupRoot "D:\Backups" -Type "full"
+
+    .EXAMPLE
+        $head = Get-SEBLatestManifest -InstanceName "Survival01" -BackupRoot "D:\Backups" -ChainId "chain_20260201_020000"
 
     .OUTPUTS
         System.Collections.Hashtable or $null
@@ -50,7 +62,10 @@ function Get-SEBLatestManifest {
 
         [Parameter()]
         [ValidateSet('full', 'incremental')]
-        [string]$Type
+        [string]$Type,
+
+        [Parameter()]
+        [string]$ChainId
     )
 
     $manifestDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName | Join-Path -ChildPath 'manifests'
@@ -71,6 +86,9 @@ function Get-SEBLatestManifest {
 
     $latestManifest = $null
     $latestTimestamp = [datetime]::MinValue
+    # Only meaningful when -ChainId restricts the search: pick the chain head by highest
+    # chain_sequence, breaking ties with the most recent timestamp.
+    $latestSequence = -1
 
     foreach ($file in $manifestFiles) {
         try {
@@ -86,6 +104,11 @@ function Get-SEBLatestManifest {
             continue
         }
 
+        # Apply chain filter if specified
+        if (-not [string]::IsNullOrWhiteSpace($ChainId) -and $manifest['chain_id'] -ne $ChainId) {
+            continue
+        }
+
         # Parse timestamp and track the latest
         try {
             $timestamp = [datetime]::Parse($manifest['timestamp'])
@@ -95,14 +118,28 @@ function Get-SEBLatestManifest {
             continue
         }
 
-        if ($timestamp -gt $latestTimestamp) {
+        if (-not [string]::IsNullOrWhiteSpace($ChainId)) {
+            # Chain-scoped: order by chain_sequence first, then timestamp as a tie-breaker.
+            $sequence = try { [int]$manifest['chain_sequence'] } catch { -1 }
+            if ($sequence -gt $latestSequence -or
+                ($sequence -eq $latestSequence -and $timestamp -gt $latestTimestamp)) {
+                $latestSequence = $sequence
+                $latestTimestamp = $timestamp
+                $latestManifest = $manifest
+            }
+        }
+        elseif ($timestamp -gt $latestTimestamp) {
             $latestTimestamp = $timestamp
             $latestManifest = $manifest
         }
     }
 
     if ($null -eq $latestManifest) {
-        Write-Verbose "No matching manifests found$(if ($Type) { " of type '$Type'" })."
+        $filterDesc = @(
+            $(if ($Type) { "of type '$Type'" })
+            $(if (-not [string]::IsNullOrWhiteSpace($ChainId)) { "in chain '$ChainId'" })
+        ) | Where-Object { $_ }
+        Write-Verbose "No matching manifests found$(if ($filterDesc) { ' ' + ($filterDesc -join ' ') })."
         return $null
     }
 
