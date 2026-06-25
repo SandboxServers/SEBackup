@@ -120,7 +120,7 @@ BeforeAll {
         $incFiles['Sandbox.sbc']            = New-FileEntry -FullPath (Join-Path $incStage 'Sandbox.sbc')
         $incFiles['new.dat']                = New-FileEntry -FullPath (Join-Path $incStage 'new.dat')
         $incFiles['keep.dat']               = New-FileEntry -FullPath (Join-Path $fullStage 'keep.dat')
-        $incFiles['sub/SANDBOX_0_0_0_.sbs'] = New-FileEntry -FullPath (Join-Path $fullStage 'sub\SANDBOX_0_0_0_.sbs')
+        $incFiles['sub/SANDBOX_0_0_0_.sbs'] = New-FileEntry -FullPath (Join-Path (Join-Path $fullStage 'sub') 'SANDBOX_0_0_0_.sbs')
 
         $incManifestName = 'Survival01_INC_20260202_020000.json'
         $incManifest = @{

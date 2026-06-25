@@ -148,7 +148,7 @@ function Test-SEBChainIntegrity {
 
         if ([string]::IsNullOrWhiteSpace($targetManifest)) {
             $result.ErrorMessage = "No manifest chain found for instance '$InstanceName'" +
-                $(if ($ChainId) { " (chain: $ChainId)" } else { " (latest)" })
+                $(if (-not [string]::IsNullOrWhiteSpace($ChainId)) { " (chain: $ChainId)" } else { " (latest)" })
             return $result
         }
 
@@ -160,7 +160,7 @@ function Test-SEBChainIntegrity {
 
         if ($null -eq $chain -or $chain.Count -eq 0) {
             $result.ErrorMessage = "No manifest chain found for instance '$InstanceName'" +
-                $(if ($ChainId) { " (chain: $ChainId)" } else { " (latest)" })
+                $(if (-not [string]::IsNullOrWhiteSpace($ChainId)) { " (chain: $ChainId)" } else { " (latest)" })
             return $result
         }
 
