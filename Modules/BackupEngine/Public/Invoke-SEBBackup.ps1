@@ -433,6 +433,8 @@ function Invoke-SEBBackup {
             # Prune unchanged files from staging on the node. NON-IDEMPOTENT (deletes files);
             # -RetryCount 0 so a transport drop after the prune does not re-run it. A failure
             # throws and aborts the backup (the archive would otherwise carry the wrong delta).
+            # | Out-Null: the wrapper returns the remote block's output; this block is side-effect
+            # only, so discard it so nothing leaks into Invoke-SEBBackup's own (single-object) output.
             Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
                 param($StagingDir, $KeepRelative)
                 $keep = [System.Collections.Generic.HashSet[string]]::new(
@@ -445,7 +447,7 @@ function Invoke-SEBBackup {
                         Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
                     }
                 }
-            } -ArgumentList @($nodeStagingDir, $changedFiles)
+            } -ArgumentList @($nodeStagingDir, $changedFiles) | Out-Null
         }
 
         # ========================================================================
@@ -466,12 +468,15 @@ function Invoke-SEBBackup {
         # compression step (which surfaces its own error if the handle is truly dead).
         try { $session = New-SEBSession -NodeName $NodeName -NodeConfig @{ hostname = $nodeHostname } }
         catch { Write-Verbose "Cache refresh before compression failed; using existing session. $_" }
+        # | Out-Null: Compress-SEBArchive returns a summary PSCustomObject the orchestrator does not
+        # consume (the authoritative size is read back from the node below). Discard it so it does
+        # not leak into Invoke-SEBBackup's output stream and turn the caller's $result into an array.
         Compress-SEBArchive `
             -SourcePath       $nodeStagingDir `
             -DestinationPath  $nodeArchivePath `
             -Session          $session `
             -Engine           $resolvedEngine `
-            -CompressionLevel $compressionLevel
+            -CompressionLevel $compressionLevel | Out-Null
 
         # Get archive size from node
         $archiveInfo = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
@@ -530,11 +535,13 @@ function Invoke-SEBBackup {
         $netBandwidthMbps = if ($globalConfig.network.max_bandwidth_mbps) { [int]$globalConfig.network.max_bandwidth_mbps } else { 0 }
         $netRobocopyIpgMs = if ($globalConfig.network.robocopy_ipg_ms) { [int]$globalConfig.network.robocopy_ipg_ms } else { 0 }
 
+        # | Out-Null: Copy-SEBThrottled returns a transfer-result PSCustomObject the orchestrator
+        # does not consume; discard it so it does not leak into this function's single-object output.
         Copy-SEBThrottled `
             -Source           $shareArchivePath `
             -Destination      $ccArchivePath `
             -MaxBandwidthMbps $netBandwidthMbps `
-            -RobocopyIpgMs    $netRobocopyIpgMs
+            -RobocopyIpgMs    $netRobocopyIpgMs | Out-Null
 
         $result.ArchiveFile = $ccArchivePath
 
@@ -662,11 +669,13 @@ function Invoke-SEBBackup {
                     Write-SEBLog -Message "Copying archive to NAS: $nasArchivePath" -Level INFO -Context $InstanceName
                 }
 
+                # | Out-Null: discard Copy-SEBThrottled's result object (not consumed) so it does not
+                # leak into Invoke-SEBBackup's output stream.
                 Copy-SEBThrottled `
                     -Source           $ccArchivePath `
                     -Destination      $nasArchivePath `
                     -MaxBandwidthMbps $netBandwidthMbps `
-                    -RobocopyIpgMs    $netRobocopyIpgMs
+                    -RobocopyIpgMs    $netRobocopyIpgMs | Out-Null
 
                 if ($hasLogger) {
                     Write-SEBLog -Message "NAS copy completed." -Level INFO -Context $InstanceName
@@ -771,7 +780,7 @@ function Invoke-SEBBackup {
                     }
                     Remove-Item -Path $archive.FullName -Force -ErrorAction SilentlyContinue
                 }
-            } -ArgumentList $nodeStagingDir, $nodeArchivePath -ErrorAction Stop
+            } -ArgumentList $nodeStagingDir, $nodeArchivePath -ErrorAction Stop | Out-Null
         }
         catch {
             $warnings.Add("Node staging cleanup failed: $_")
