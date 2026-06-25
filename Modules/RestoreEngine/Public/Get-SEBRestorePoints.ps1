@@ -38,6 +38,13 @@ function Get-SEBRestorePoints {
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNullOrEmpty()]
+        # $InstanceName is concatenated into a filesystem path (Join-Path $BackupRoot $InstanceName).
+        # Without this guard, a value like '..\..\x' would escape $BackupRoot and let discovery walk
+        # arbitrary directories. The pattern matches the manifest/instance naming convention
+        # (alphanumerics, underscore, hyphen) and rejects path separators, '.', ':' and wildcards.
+        # NOTE: a shared traversal validator is planned in issue #28; this inline guard is the
+        # immediate fix.
+        [ValidatePattern('^[A-Za-z0-9_-]+$')]
         [string]$InstanceName,
 
         [Parameter()]
@@ -79,7 +86,10 @@ function Get-SEBRestorePoints {
     $allManifests = @{}
     foreach ($mf in $manifestFiles) {
         try {
-            $content = Get-Content -Path $mf.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            # -LiteralPath: a manifest filename can legitimately contain PowerShell wildcard
+            # metacharacters ('[', ']', etc.); -Path would interpret them as a glob and fail to read
+            # the real file. This pairs with the exact-stem archive matching below.
+            $content = Get-Content -LiteralPath $mf.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
             $content['_source_filename'] = $mf.Name
             $content['_full_path'] = $mf.FullName
             $allManifests[$mf.Name] = $content
@@ -87,6 +97,33 @@ function Get-SEBRestorePoints {
         catch {
             Write-Warning "Failed to read manifest '$($mf.Name)': $_"
         }
+    }
+
+    # Build an O(1) lookup of every real archive under full\ and incremental\ ONCE, up front, keyed
+    # by the archive's stem. 'Stem' = the file's BaseName (filename without its final extension),
+    # which is what links an archive back to its manifest ('{name}.json' <-> '{name}.7z'). Mapping
+    # stem -> FileInfo (rather than just a presence set) lets the restore-point lookup below recover
+    # the archive's FullName and Length for the output object, while the chain-validation loop only
+    # needs an O(1) ContainsKey existence test. This single up-front scan fixes two issues with the
+    # previous per-manifest `Get-ChildItem -Filter "${baseName}.*"`:
+    #   1. (security) a '*' or '?' in a manifest-derived stem would be treated as a wildcard by
+    #      -Filter and could glob to an unintended archive. Exact-string keying cannot glob.
+    #   2. (efficiency) the chain-validation inner loop re-scanned the archive dirs for every chain
+    #      member, which is O(N^2) over a chain. The pre-built map makes each test O(1).
+    # We honour the same exclusions as before: '.json' is not an archive, and '_BAD' artifacts are
+    # failed-integrity backups that must never be offered. If two archives share a stem (should not
+    # happen in the engine layout), the first one scanned wins -- matching the prior
+    # `Select-Object -First 1` behaviour.
+    $archivesByStem = [System.Collections.Generic.Dictionary[string, System.IO.FileInfo]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($archiveDir in @($fullDir, $incDir)) {
+        if (-not (Test-Path -Path $archiveDir -PathType Container)) { continue }
+        Get-ChildItem -Path $archiveDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' } |
+            ForEach-Object {
+                if (-not $archivesByStem.ContainsKey($_.BaseName)) {
+                    $archivesByStem[$_.BaseName] = $_
+                }
+            }
     }
 
     $restorePoints = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -100,21 +137,17 @@ function Get-SEBRestorePoints {
         $chainSequence = [int]$manifest['chain_sequence']
         $timestamp = $manifest['timestamp']
 
-        # Find the archive file
+        # Find the archive file via the pre-built exact-stem map (the manifest stem == the archive
+        # stem). This is an exact-string match, so a wildcard char in the manifest name can never
+        # glob to an unintended archive.
         $archiveFile = $null
         $archiveSizeBytes = 0
 
-        $searchDir = if ($manifestType -eq 'full') { $fullDir } else { $incDir }
         $baseName = $mf.BaseName
-
-        if (Test-Path -Path $searchDir -PathType Container) {
-            $candidates = Get-ChildItem -Path $searchDir -Filter "${baseName}.*" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' }
-            if ($candidates) {
-                $archiveItem = $candidates | Select-Object -First 1
-                $archiveFile = $archiveItem.FullName
-                $archiveSizeBytes = $archiveItem.Length
-            }
+        $archiveItem = $null
+        if ($archivesByStem.TryGetValue($baseName, [ref]$archiveItem)) {
+            $archiveFile = $archiveItem.FullName
+            $archiveSizeBytes = $archiveItem.Length
         }
 
         # Validate the chain: every manifest from the full (seq 0) to this one must exist
@@ -148,21 +181,12 @@ function Get-SEBRestorePoints {
                             break
                         }
 
-                        # Check that the member's archive exists
+                        # Check that the member's archive exists -- O(1) exact-stem lookup against
+                        # the map built once above (no per-member directory scan, no globbing).
                         $memberName = $member['_source_filename']
                         $memberBaseName = [System.IO.Path]::GetFileNameWithoutExtension($memberName)
-                        $memberType = $member['type']
-                        $memberSearchDir = if ($memberType -eq 'full') { $fullDir } else { $incDir }
 
-                        if (Test-Path -Path $memberSearchDir -PathType Container) {
-                            $memberArchives = Get-ChildItem -Path $memberSearchDir -Filter "${memberBaseName}.*" -File -ErrorAction SilentlyContinue |
-                                Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' }
-                            if (-not $memberArchives) {
-                                $chainValid = $false
-                                break
-                            }
-                        }
-                        else {
+                        if (-not $archivesByStem.ContainsKey($memberBaseName)) {
                             $chainValid = $false
                             break
                         }

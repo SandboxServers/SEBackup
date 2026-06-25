@@ -368,7 +368,7 @@ try {
             Write-Host '  [PASS] World save restored successfully.' -ForegroundColor Green
         }
         else {
-            $errorMsg = if ($restoreResult -and $restoreResult.Error) { $restoreResult.Error } else { 'Unknown error' }
+            $errorMsg = if ($restoreResult -and $restoreResult.ErrorMessage) { $restoreResult.ErrorMessage } else { 'Unknown error' }
             throw "Restore operation failed: $errorMsg"
         }
     }
@@ -382,7 +382,11 @@ try {
     Write-Host '[4/4] Verifying restore...' -ForegroundColor Yellow
     try {
         $instanceConfig = Get-SEBInstanceConfig -Session $session -InstanceName $InstanceName
-        $worldPath = $instanceConfig.paths.world_save
+        # Read the CANONICAL flat key. The engine (Invoke-SEBRestore) and Test-SEBPreFlight both
+        # read $instanceConfig['world_path']; the legacy nested 'paths.world_save' key does not
+        # exist on real instance configs, so this verification block was passing $null as the
+        # world path and the remote Test-Path checks always reported "could not verify".
+        $worldPath = $instanceConfig['world_path']
 
         $verifyResult = Invoke-Command -Session $session -ScriptBlock {
             param($WorldPath)

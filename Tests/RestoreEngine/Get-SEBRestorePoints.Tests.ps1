@@ -56,7 +56,6 @@ BeforeAll {
             [string]$ChainId,
             [int]$Seq,
             [string]$ArchiveName,
-            [long]$ArchiveSize = 1024,
             [string]$Timestamp
         )
         if (-not $Timestamp) { $Timestamp = [datetime]::UtcNow.ToString('o') }
@@ -70,7 +69,10 @@ BeforeAll {
             files              = @{ 'Sandbox.sbc' = @{ size = 1; sha256 = ('a' * 64); last_write = $Timestamp } }
             deleted_files      = @()
             archive_path       = $ArchiveName
-            archive_size_bytes = $ArchiveSize
+            # archive_size_bytes is part of a real engine manifest, but Get-SEBRestorePoints derives
+            # SizeBytes from the archive file's length on disk -- it never reads this field -- so the
+            # value here is irrelevant to the tests and kept as a static placeholder.
+            archive_size_bytes = 1024
             archive_sha256     = ('b' * 64)
         }
         $m | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Dir $Name)
@@ -229,6 +231,72 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
             finally {
                 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             }
+        }
+    }
+
+    Context 'rejects a path-traversal InstanceName (security)' {
+        # $InstanceName is concatenated into the backup path (Join-Path $BackupRoot $InstanceName).
+        # The ValidatePattern guard ('^[A-Za-z0-9_-]+$') must reject anything containing path
+        # separators or '..' so discovery cannot be steered outside $BackupRoot. A ValidatePattern
+        # violation is a terminating parameter-binding error, so the call throws.
+        It 'throws on a traversal value like ..\evil' {
+            { Get-SEBRestorePoints -InstanceName '..\evil' -BackupRoot 'C:\Backups' } | Should -Throw
+        }
+
+        It 'throws on a forward-slash traversal value' {
+            { Get-SEBRestorePoints -InstanceName '../evil' -BackupRoot 'C:\Backups' } | Should -Throw
+        }
+
+        It 'throws on an absolute-path-like value' {
+            { Get-SEBRestorePoints -InstanceName 'C:\Windows' -BackupRoot 'C:\Backups' } | Should -Throw
+        }
+
+        It 'still accepts a normal hyphen/underscore instance name' {
+            # A name that satisfies the pattern must NOT be rejected by the validator. There are no
+            # backups under this fresh root, so the function returns an empty set rather than throwing.
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sebrp_" + [guid]::NewGuid().ToString('n'))
+            New-Item -Path $root -ItemType Directory -Force | Out-Null
+            try {
+                { Get-SEBRestorePoints -InstanceName 'PvP_Arena-01' -BackupRoot $root } | Should -Not -Throw
+                @(Get-SEBRestorePoints -InstanceName 'PvP_Arena-01' -BackupRoot $root) | Should -HaveCount 0
+            }
+            finally {
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Context 'archive resolution is an exact-stem match, not a wildcard glob (security)' {
+        # Fix #4: archive lookups must match the manifest stem EXACTLY. A manifest filename can
+        # legally contain PowerShell wildcard metacharacters; the previous `-Filter "${stem}.*"`
+        # would treat them as a glob -- failing to find the real (literal) archive and potentially
+        # matching an unrelated one. Here the manifest stem contains a '[x]' character class.
+        BeforeAll {
+            $script:tree = New-BackupTree -InstanceName 'GlobTest'
+            $script:chainId = [guid]::NewGuid().ToString()
+
+            # The real archive whose stem contains literal brackets. Under the old glob, the pattern
+            # 'Decoy_FULL_a[x]b.*' would NOT match this literal file (the class '[x]' matches a bare
+            # 'x'), so the old code would report no archive for its manifest.
+            New-Archive -Dir $tree.Full -Name 'Decoy_FULL_a[x]b.7z' | Out-Null
+            # A decoy whose name the OLD glob WOULD have matched (a[x]b -> axb). Exact-stem matching
+            # must ignore it.
+            New-Archive -Dir $tree.Full -Name 'Decoy_FULL_axb.7z' | Out-Null
+
+            New-EngineManifest -Dir $tree.Manifests -Name 'Decoy_FULL_a[x]b.json' `
+                -Type 'full' -ChainId $chainId -Seq 0 -ArchiveName 'Decoy_FULL_a[x]b.7z'
+        }
+
+        AfterAll {
+            Remove-Item -LiteralPath $script:tree.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It 'resolves the bracketed manifest to its exact-named archive and marks the chain valid' {
+            $points = Get-SEBRestorePoints -InstanceName 'GlobTest' -BackupRoot $tree.Root
+            $points | Should -HaveCount 1
+            $points[0].ArchiveFile | Should -Not -BeNullOrEmpty
+            (Split-Path -Path $points[0].ArchiveFile -Leaf) | Should -Be 'Decoy_FULL_a[x]b.7z'
+            $points[0].ChainValid | Should -BeTrue
         }
     }
 }
