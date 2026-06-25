@@ -70,7 +70,7 @@ Describe 'SEBackup Root Module' {
             'Logger', 'ConfigManager', 'CredentialManager', 'RemoteManager',
             'VRageAPI', 'VSSManager', 'ManifestManager', 'CompressionManager',
             'IntegrityManager', 'LoadMonitor', 'NetworkThrottle', 'NotificationManager',
-            'BackupEngine', 'SchedulerManager'
+            'MetricsCollector', 'BackupEngine', 'RestoreEngine', 'SchedulerManager'
         ) {
             $modPath = Join-Path $ModulesPath "$_\$_.psm1"
             Test-Path $modPath -PathType Leaf | Should -BeTrue
@@ -167,6 +167,11 @@ Describe 'ConfigManager Module' {
     # discovery and the contexts would always skip).
     BeforeDiscovery {
         $psTomlAvailable = $null -ne (Get-Module -Name PSToml -ListAvailable -ErrorAction SilentlyContinue)
+        # In CI, PSToml MUST be present: a silent skip would weaken the merge gate (the
+        # ConfigManager tests would simply vanish from the count). Fail loudly instead.
+        if (-not $psTomlAvailable -and $env:CI) {
+            throw 'PSToml is not installed. Install it before running the gate suite in CI (Install-Module PSToml -Force).'
+        }
     }
 
     Context 'Module functions exist' -Skip:(-not $psTomlAvailable) {
@@ -513,7 +518,9 @@ Describe 'RemoteManager Module' {
             'Invoke-SEBRemoteCommand', 'Get-SEBSharePath', 'Test-SEBShare',
             'Mount-SEBShare'
         ) {
-            Get-Command -Name $_ -ErrorAction SilentlyContinue |
+            # Qualify with -Module so a same-named command from another loaded module
+            # cannot make this assert pass when RemoteManager itself failed to import.
+            Get-Command -Name $_ -Module RemoteManager -ErrorAction SilentlyContinue |
                 Should -Not -BeNullOrEmpty
         }
     }
@@ -588,7 +595,8 @@ Describe 'BackupEngine Module' {
     Context 'Exported functions exist' {
         It 'Function exists: <_>' -ForEach @(
             'Invoke-SEBBackup', 'Invoke-SEBBackupAll',
-            'Get-SEBBackupHistory', 'Remove-SEBExpiredBackups'
+            'Get-SEBBackupHistory', 'Remove-SEBExpiredBackups',
+            'New-SEBLockFile', 'Remove-SEBLockFile'
         ) {
             Get-Command -Name $_ -Module BackupEngine -ErrorAction SilentlyContinue |
                 Should -Not -BeNullOrEmpty
@@ -610,6 +618,51 @@ Describe 'SchedulerManager Module' {
             'Get-SEBScheduleStatus', 'Update-SEBSchedule'
         ) {
             Get-Command -Name $_ -Module SchedulerManager -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'MetricsCollector Module' {
+    BeforeAll {
+        $metricsPath = Join-Path $ModulesPath 'MetricsCollector\MetricsCollector.psm1'
+        if (Test-Path $metricsPath) {
+            Import-Module $metricsPath -Force -DisableNameChecking
+        }
+    }
+
+    Context 'Exported functions exist' {
+        It 'Function exists: <_>' -ForEach @(
+            'Add-SEBMetric', 'Get-SEBMetrics', 'Get-SEBDiskSpace',
+            'Get-SEBHealthSummary', 'Clear-SEBOldMetrics'
+        ) {
+            Get-Command -Name $_ -Module MetricsCollector -ErrorAction SilentlyContinue |
+                Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'RestoreEngine Module' {
+    BeforeAll {
+        $restorePath = Join-Path $ModulesPath 'RestoreEngine\RestoreEngine.psm1'
+        if (Test-Path $restorePath) {
+            # RestoreEngine depends on several sibling modules; import them so it loads cleanly.
+            foreach ($dep in 'Logger', 'ConfigManager', 'CredentialManager', 'RemoteManager',
+                'VRageAPI', 'CompressionManager', 'IntegrityManager', 'ManifestManager',
+                'NetworkThrottle', 'NotificationManager', 'BackupEngine') {
+                $depPath = Join-Path $ModulesPath "$dep\$dep.psm1"
+                if (Test-Path $depPath) { Import-Module $depPath -Force -DisableNameChecking }
+            }
+            Import-Module $restorePath -Force -DisableNameChecking
+        }
+    }
+
+    Context 'Exported functions exist' {
+        It 'Function exists: <_>' -ForEach @(
+            'Invoke-SEBRestore', 'Get-SEBRestorePoints',
+            'Test-SEBRestoreChain', 'Undo-SEBRestore'
+        ) {
+            Get-Command -Name $_ -Module RestoreEngine -ErrorAction SilentlyContinue |
                 Should -Not -BeNullOrEmpty
         }
     }

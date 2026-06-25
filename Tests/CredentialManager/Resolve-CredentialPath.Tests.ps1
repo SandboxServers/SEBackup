@@ -23,11 +23,13 @@ Describe 'Resolve-CredentialPath node-name validation' {
         }
     }
 
-    It 'rejects path traversal and separators' {
-        InModuleScope CredentialManager {
-            foreach ($bad in @('../evil', '..\evil', 'a/b', 'a\b', '..', '.', 'C:\x')) {
-                { Resolve-CredentialPath -NodeName $bad } | Should -Throw -ExpectedMessage '*Invalid node name*'
-            }
+    It 'rejects path traversal and separators: <_>' -ForEach @('../evil', '..\evil', 'a/b', 'a\b', '..', '.', 'C:\x') {
+        # One It per bad input (Pester 5 -ForEach): a foreach inside a single It short-circuits
+        # on the first failure and hides which input regressed.
+        $bad = $_
+        InModuleScope CredentialManager -Parameters @{ bad = $bad } {
+            param($bad)
+            { Resolve-CredentialPath -NodeName $bad } | Should -Throw -ExpectedMessage '*Invalid node name*'
         }
     }
 }
