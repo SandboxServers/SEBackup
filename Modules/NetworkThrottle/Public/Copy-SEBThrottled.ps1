@@ -137,9 +137,19 @@ function Copy-SEBThrottled {
                 # Robocopy requires source dir and destination dir for directory copies,
                 # or source dir + file pattern for single files
                 if (Test-Path -Path $Source -PathType Leaf) {
+                    # Robocopy's second argument is the destination DIRECTORY, not a file path.
+                    # Passing a file path made robocopy create a directory by that name and copy
+                    # the file inside it. Resolve the destination directory robustly: -Destination
+                    # may be a directory, a full file path, or a bare filename (GetDirectoryName
+                    # returns '' ) -- fall back to the current location so we never hand New-Item
+                    # or robocopy an empty path.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $robocopyArgs = @($sourceDir, $Destination, $sourceFile, "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
+                    $destDir = Resolve-DestinationDirectory -Destination $Destination
+                    if (-not (Test-Path -Path $destDir -PathType Container)) {
+                        New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    }
+                    $robocopyArgs = @($sourceDir, $destDir, $sourceFile, "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
                 }
                 else {
                     $robocopyArgs = @($Source, $Destination, '/E', "/IPG:$effectiveIpg", '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
@@ -158,9 +168,14 @@ function Copy-SEBThrottled {
                 $method = 'Robocopy'
 
                 if (Test-Path -Path $Source -PathType Leaf) {
+                    # Robocopy's second argument is the destination DIRECTORY, not a file path.
                     $sourceDir = [System.IO.Path]::GetDirectoryName($Source)
                     $sourceFile = [System.IO.Path]::GetFileName($Source)
-                    $robocopyArgs = @($sourceDir, $Destination, $sourceFile, '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
+                    $destDir = Resolve-DestinationDirectory -Destination $Destination
+                    if (-not (Test-Path -Path $destDir -PathType Container)) {
+                        New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    }
+                    $robocopyArgs = @($sourceDir, $destDir, $sourceFile, '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
                 }
                 else {
                     $robocopyArgs = @($Source, $Destination, '/E', '/R:3', '/W:5', '/NP', '/NDL', '/NJH', '/NJS')
@@ -202,6 +217,39 @@ function Copy-SEBThrottled {
     }
 
     $stopwatch.Stop()
+
+    # Robocopy copies a leaf into a directory keeping the source filename. If the requested
+    # Destination filename differs, move it into place; then verify the file actually landed
+    # (robocopy can report a success-ish exit code while leaving nothing at the expected path).
+    if ($method -eq 'Robocopy' -and (Test-Path -Path $Source -PathType Leaf)) {
+        # Resolve where robocopy actually placed the file (always <destDir>\<sourceName>) and the
+        # final expected path. When -Destination is a directory the file keeps its source name
+        # there; otherwise -Destination is the full target path and the landed file may need to
+        # be renamed into place.
+        $destDir = Resolve-DestinationDirectory -Destination $Destination
+        $expectedDest = if ((Test-Path -Path $Destination -PathType Container) -or
+            $Destination.EndsWith([System.IO.Path]::DirectorySeparatorChar) -or
+            $Destination.EndsWith([System.IO.Path]::AltDirectorySeparatorChar)) {
+            Join-Path -Path $destDir -ChildPath ([System.IO.Path]::GetFileName($Source))
+        }
+        else {
+            $Destination
+        }
+
+        # Compare fully-resolved paths: for a bare destination like 'backup.zip', $expectedDest is
+        # relative while $landed is rooted via $destDir, so a string compare could try to move the
+        # file onto itself. Use -LiteralPath so names with [ ] are not treated as wildcards.
+        $landed = Join-Path -Path $destDir -ChildPath ([System.IO.Path]::GetFileName($Source))
+        $landedFull = [System.IO.Path]::GetFullPath($landed)
+        $expectedFull = [System.IO.Path]::GetFullPath($expectedDest)
+        if ($landedFull -ne $expectedFull -and (Test-Path -LiteralPath $landed -PathType Leaf)) {
+            Move-Item -LiteralPath $landed -Destination $expectedDest -Force -ErrorAction Stop
+        }
+        if (-not (Test-Path -LiteralPath $expectedDest -PathType Leaf)) {
+            throw "Throttled copy did not produce the destination file '$expectedDest'."
+        }
+    }
+
     $durationSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
 
     # Calculate average throughput in Mbps

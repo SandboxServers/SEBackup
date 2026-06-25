@@ -98,7 +98,7 @@ function Get-SEBManifestChain {
         $expected = $i
         $actual = [int]$chain[$i]['chain_sequence']
         if ($actual -ne $expected) {
-            Write-Warning "Chain sequence mismatch at position $i: expected $expected, got $actual in manifest '$($chain[$i]['_source_filename'])'."
+            Write-Warning "Chain sequence mismatch at position ${i}: expected $expected, got $actual in manifest '$($chain[$i]['_source_filename'])'."
         }
     }
 

@@ -475,6 +475,10 @@ volume         = "C:\\"
         return $results
     } -ErrorAction Stop
 
+    if ($null -eq $installResult) {
+        throw "NodeAgent install returned no result from the remote node."
+    }
+
     $checks['NodeAgent Install'] = $true
 
     if ($installResult.DirectoriesCreated.Count -gt 0) {

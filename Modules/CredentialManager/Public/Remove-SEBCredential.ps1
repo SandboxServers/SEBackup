@@ -44,8 +44,7 @@ function Remove-SEBCredential {
         [switch]$Force
     )
 
-    $credentialDir = Resolve-CredentialPath
-    $credentialFile = Join-Path -Path $credentialDir -ChildPath "$NodeName.cred.xml"
+    $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
     if (-not (Test-Path -Path $credentialFile)) {
         Write-Warning "No credential file found for node '$NodeName' at: $credentialFile"

@@ -89,7 +89,9 @@ function Test-SEBManifestIntegrity {
         }
 
         $manifestRaw = Get-Content -Path $ManifestPath -Raw -ErrorAction Stop
-        $manifest = $manifestRaw | ConvertFrom-Json -ErrorAction Stop
+        # Parse as a hashtable so 'files' is the path-keyed v2 map (not a PSCustomObject
+        # that foreach would treat as a single opaque item).
+        $manifest = $manifestRaw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
 
         # --- Step 2: List files inside the archive ---
         $archiveContentsParams = @{
@@ -108,46 +110,64 @@ function Test-SEBManifestIntegrity {
         # --- Step 3: Compare file count, names, and sizes ---
         $mismatches = [System.Collections.Generic.List[string]]::new()
 
-        # Get the file list from the manifest
+        # Get the file list from the manifest's path-keyed 'files' hashtable (v2 schema:
+        # relativePath -> @{ size; sha256; last_write }), normalized to forward slashes.
         $manifestFiles = @{}
         if ($manifest.files) {
-            foreach ($entry in $manifest.files) {
-                $relativePath = $entry.relative_path
-                if (-not $relativePath -and $entry.path) {
-                    $relativePath = $entry.path
-                }
-                if ($relativePath) {
-                    $manifestFiles[$relativePath] = $entry
-                }
+            foreach ($relativePath in $manifest.files.Keys) {
+                $manifestFiles[$relativePath.Replace('\', '/')] = $manifest.files[$relativePath]
             }
         }
 
-        # Build a lookup from archive contents
+        # Build a lookup from archive contents, normalized to forward slashes so the keys
+        # line up with the manifest regardless of the compression engine's separator.
         $archiveFiles = @{}
         foreach ($item in $archiveContents) {
             $itemPath = if ($item.Path) { $item.Path } elseif ($item.Name) { $item.Name } else { $item.ToString() }
-            $archiveFiles[$itemPath] = $item
+            $archiveFiles[$itemPath.Replace('\', '/')] = $item
         }
 
         # File count comparison
         $manifestCount = $manifestFiles.Count
         $archiveCount = $archiveFiles.Count
 
-        if ($manifestCount -eq $archiveCount) {
-            $result.FileCountMatch = $true
+        # An incremental archive carries only the delta (added/modified files), while the
+        # manifest's 'files' map is the FULL logical world state (it must stay full so restore
+        # and Level-3 reconstruction can verify the complete world). So for an incremental the
+        # archive is expected to be a SUBSET of the manifest: every archived file must appear in
+        # the manifest with a matching size, but unchanged files are legitimately absent from the
+        # archive. Requiring an exact match here renamed every incremental '_BAD'. Full archives
+        # are still required to match the manifest exactly. Whole-chain completeness (no changed
+        # file omitted) is verified separately by Level 3 (Test-SEBChainIntegrity).
+        $isIncremental = ($manifest.type -eq 'incremental')
+
+        if ($isIncremental) {
+            # Subset semantics: the archive must not contain MORE files than the manifest.
+            if ($archiveCount -le $manifestCount) {
+                $result.FileCountMatch = $true
+            }
+            else {
+                $mismatches.Add("Incremental archive file count ($archiveCount) exceeds manifest ($manifestCount)")
+            }
         }
         else {
-            $mismatches.Add("File count mismatch: manifest=$manifestCount, archive=$archiveCount")
-        }
+            if ($manifestCount -eq $archiveCount) {
+                $result.FileCountMatch = $true
+            }
+            else {
+                $mismatches.Add("File count mismatch: manifest=$manifestCount, archive=$archiveCount")
+            }
 
-        # File name matching - check that every manifest file exists in the archive
-        foreach ($mFile in $manifestFiles.Keys) {
-            if (-not $archiveFiles.ContainsKey($mFile)) {
-                $mismatches.Add("Missing from archive: $mFile")
+            # Full archive: every manifest file must exist in the archive.
+            foreach ($mFile in $manifestFiles.Keys) {
+                if (-not $archiveFiles.ContainsKey($mFile)) {
+                    $mismatches.Add("Missing from archive: $mFile")
+                }
             }
         }
 
-        # Check for extra files in the archive not in the manifest
+        # Check for extra files in the archive not in the manifest (applies to both: any file
+        # in the archive must be accounted for in the manifest's full file list).
         foreach ($aFile in $archiveFiles.Keys) {
             if (-not $manifestFiles.ContainsKey($aFile)) {
                 $mismatches.Add("Extra file in archive (not in manifest): $aFile")

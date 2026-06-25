@@ -162,7 +162,7 @@ Write-Host ''
 $logContext = $null
 if (Get-Command -Name 'Start-SEBLogContext' -ErrorAction SilentlyContinue) {
     try {
-        $logContext = Start-SEBLogContext -Operation 'Backup'
+        $logContext = Start-SEBLogContext -Context 'Backup'
     }
     catch {
         Write-Verbose "Could not start log context: $_"
@@ -380,3 +380,11 @@ else {
 
 Write-Host '╚══════════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
 Write-Host ''
+
+# Propagate failure as a non-zero exit code so the scheduled task (and any caller) sees it.
+# Without this the task always reported success even when every backup failed. $overallSuccess
+# only tracks orchestration errors, so also fail if any collected Invoke-SEBBackup result reported
+# Success = $false (e.g. an integrity failure that produced a _BAD backup).
+$failedResults = @($results | Where-Object { $_.PSObject.Properties['Success'] -and $_.Success -eq $false })
+if (-not $overallSuccess -or $failedResults.Count -gt 0) { exit 1 }
+exit 0

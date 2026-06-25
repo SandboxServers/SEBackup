@@ -40,6 +40,11 @@ function Invoke-SEBVRageRequest {
         An optional object to send as the request body. Will be serialized
         to JSON via ConvertTo-Json. Typically used with PATCH or POST methods.
 
+    .PARAMETER TimeoutSec
+        The per-request HTTP timeout in seconds. Defaults to 30. Callers that
+        issue potentially long-running requests (e.g. a synchronous world save)
+        should raise this so the request is not cut off prematurely.
+
     .EXAMPLE
         Invoke-SEBVRageRequest -Hostname 'localhost' -Port 8080 -SecurityKey 'MyKey123' -Endpoint 'server/ping'
         # Sends a GET request to http://localhost:8080/vrageremote/v1/server/ping
@@ -81,19 +86,39 @@ function Invoke-SEBVRageRequest {
         [string]$Endpoint,
 
         [Parameter()]
-        [object]$Body
+        [object]$Body,
+
+        [Parameter()]
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSec = 30
     )
 
-    # Generate HMAC-SHA1 authentication headers
-    $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey
-
-    $headers = @{
-        'Date'          = $authHeaders.Date
-        'Authorization' = $authHeaders.Authorization
+    # Build the full API URL and the absolute path that the signature is bound to. Normalize the
+    # endpoint so callers can pass 'session/save', '/session/save', or an already-prefixed
+    # '/vrageremote/v1/session/save' without double-prefixing (which would break the signed path).
+    $normalizedEndpoint = $Endpoint.TrimStart('/')
+    if ($normalizedEndpoint.StartsWith('vrageremote/v1/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $requestPath = "/$normalizedEndpoint"
     }
+    else {
+        $requestPath = "/vrageremote/v1/$normalizedEndpoint"
+    }
+    $url = "http://${Hostname}:${Port}${requestPath}"
 
-    # Build the full API URL
-    $url = "http://${Hostname}:${Port}/vrageremote/v1/${Endpoint}"
+    # Generate HMAC-SHA1 authentication headers (signature is bound to the request path).
+    # New-SEBVRageAuthHeaders throws on an invalid (non-Base64) key; keep that inside the graceful
+    # path so a misconfigured key returns $null like other request failures rather than throwing.
+    try {
+        $authHeaders = New-SEBVRageAuthHeaders -SecurityKey $SecurityKey -RequestUri $requestPath
+        $headers = @{
+            'Date'          = $authHeaders.Date
+            'Authorization' = $authHeaders.Authorization
+        }
+    }
+    catch {
+        Write-Warning "VRageAPI: Failed to generate authentication headers for ${Hostname}:${Port}/${Endpoint} - $($_.Exception.Message)"
+        return $null
+    }
 
     # Build the request parameters
     $requestParams = @{
@@ -101,7 +126,7 @@ function Invoke-SEBVRageRequest {
         Method          = $Method
         Headers         = $headers
         ContentType     = 'application/json'
-        TimeoutSec      = 30
+        TimeoutSec      = $TimeoutSec
         ErrorAction     = 'Stop'
     }
 

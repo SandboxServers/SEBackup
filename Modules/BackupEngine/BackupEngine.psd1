@@ -31,6 +31,8 @@
         'Invoke-SEBBackupAll'
         'Get-SEBBackupHistory'
         'Remove-SEBExpiredBackups'
+        'New-SEBLockFile'
+        'Remove-SEBLockFile'
     )
 
     # Cmdlets to export from this module

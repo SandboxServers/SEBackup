@@ -104,11 +104,18 @@ function Wait-SEBNodeLoad {
     }
 
     # --- Defer mode: poll until load drops or timeout ---
-    $pollIntervalSeconds = if ($loadConfig['defer_poll_interval_seconds']) {
+    # The shipped config uses check_interval_seconds / max_backoff_minutes; accept the older
+    # defer_* names too so existing configs keep working. Without this match the operator's
+    # settings were silently ignored and the hard-coded defaults were used.
+    $pollIntervalSeconds = if ($loadConfig['check_interval_seconds']) {
+        [int]$loadConfig['check_interval_seconds']
+    } elseif ($loadConfig['defer_poll_interval_seconds']) {
         [int]$loadConfig['defer_poll_interval_seconds']
     } else { 30 }
 
-    $maxWaitMinutes = if ($loadConfig['defer_wait_minutes']) {
+    $maxWaitMinutes = if ($loadConfig['max_backoff_minutes']) {
+        [int]$loadConfig['max_backoff_minutes']
+    } elseif ($loadConfig['defer_wait_minutes']) {
         [int]$loadConfig['defer_wait_minutes']
     } else { 60 }
 

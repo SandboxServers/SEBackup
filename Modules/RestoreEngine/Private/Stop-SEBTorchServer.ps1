@@ -160,8 +160,52 @@ function Stop-SEBTorchServer {
                     Start-Sleep -Seconds 3
                     $ping = Test-SEBVRageAPI -Hostname $nodeHostname -Port $vragePort -SecurityKey $vrageKey
                     if (-not $ping) {
+                        # The API is down, but the process may still be flushing and closing the
+                        # world files. Overwriting the world dir while those handles are open
+                        # corrupts the restore, so wait for the actual process to exit (handles
+                        # released), then settle briefly. Fall back to the settle delay alone if
+                        # the process cannot be located by name.
+                        $procName = if ($InstanceConfig.ContainsKey('process_name') -and -not [string]::IsNullOrWhiteSpace($InstanceConfig['process_name'])) {
+                            $InstanceConfig['process_name']
+                        }
+                        else { 'Torch.Server' }
+
+                        # Give the process-exit wait its OWN deadline. Reusing the outer $deadline
+                        # (already mostly consumed waiting for the API to drop) meant that if the API
+                        # only went unreachable near the end of the window, this loop never ran and
+                        # only the 3s settle applied -- robocopy could then overwrite the world dir
+                        # while Torch.Server still held file handles, corrupting the restore.
+                        $procDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                        $processExited = $false
+                        while ((Get-Date) -lt $procDeadline) {
+                            $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
+                                param($name)
+                                [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)
+                            } -ArgumentList $procName -ErrorAction SilentlyContinue
+                            if (-not $stillRunning) { $processExited = $true; break }
+                            Start-Sleep -Seconds 2
+                        }
+
+                        # If the process is STILL running, do not claim success: deploying over the
+                        # world dir while Torch.Server holds file handles corrupts the restore. The
+                        # caller treats a non-stopped result as fatal (unless run_mode is manual).
+                        if (-not $processExited) {
+                            $warnMsg = "VRage API stopped responding, but process '$procName' was still running after ${TimeoutSeconds}s. Refusing to proceed (deploying now could corrupt the world)."
+                            if ($hasLogger) {
+                                Write-SEBLog -Message $warnMsg -Level ERROR -Context $instanceName
+                            }
+                            return [PSCustomObject]@{
+                                Stopped      = $false
+                                Method       = 'console_api'
+                                ErrorMessage = $warnMsg
+                            }
+                        }
+
+                        # Settle to let the OS release any lingering file handles.
+                        Start-Sleep -Seconds 3
+
                         if ($hasLogger) {
-                            Write-SEBLog -Message "Console-mode Torch server stopped (API unreachable)." -Level INFO -Context $instanceName
+                            Write-SEBLog -Message "Console-mode Torch server stopped (API unreachable, process '$procName' exited)." -Level INFO -Context $instanceName
                         }
                         return [PSCustomObject]@{
                             Stopped      = $true

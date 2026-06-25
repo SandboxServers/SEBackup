@@ -24,11 +24,12 @@ function ConvertTo-RobocopyIpg {
 
     .EXAMPLE
         ConvertTo-RobocopyIpg -MaxBandwidthMbps 10
-        # Returns: 51 (approximately 51ms delay between 64KB packets)
+        # Returns: 52 (~52ms delay between 64KB packets)
 
     .EXAMPLE
-        ConvertTo-RobocopyIpg -MaxBandwidthMbps 100
-        # Returns: 5
+        ConvertTo-RobocopyIpg -MaxBandwidthMbps 1000
+        # Returns: 0 -- above ~512 Mbps a 1ms IPG would still cap throughput at ~512 Mbps,
+        # so throttling cannot represent the target and is disabled rather than over-limiting.
 
     .EXAMPLE
         ConvertTo-RobocopyIpg -MaxBandwidthMbps 0
@@ -52,12 +53,15 @@ function ConvertTo-RobocopyIpg {
     # Robocopy sends data in 64 KB packets
     # IPG (ms) = (64 KB * 8 bits/byte) / (MaxBandwidthMbps * 1000 Kbps/Mbps) * 1000 ms/s
     # Simplified: 512 / MaxBandwidthMbps
-    $ipg = [math]::Ceiling(512.0 / $MaxBandwidthMbps)
+    $rawIpg = 512.0 / $MaxBandwidthMbps
 
-    # Ensure at least 1ms if throttling is desired
-    if ($ipg -lt 1) {
-        $ipg = 1
+    # /IPG is an integer-millisecond gap with a 1ms floor. When the target bandwidth is high
+    # enough that even a 1ms gap would still cap throughput below it (> ~512 Mbps), IPG cannot
+    # represent the target -- clamping to 1ms would WRONGLY throttle a fast link down to ~512
+    # Mbps, so disable throttling (return 0) instead.
+    if ($rawIpg -lt 1) {
+        return 0
     }
 
-    return $ipg
+    return [int][math]::Ceiling($rawIpg)
 }

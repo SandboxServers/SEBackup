@@ -70,8 +70,13 @@ function Get-SEBBackupHistory {
         return @()
     }
 
+    # Newest-first by the timestamp embedded in the filename (yyyyMMdd_HHmmss sorts
+    # chronologically as text); a raw Name sort interleaves by the _FULL_/_INC_ label.
     $manifestFiles = Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue |
-        Sort-Object -Property Name -Descending
+        Sort-Object -Property @{ Expression = {
+                if ($_.Name -match '_(\d{8}_\d{6})(?=\.[^.]+$)') { $Matches[1] } else { $_.Name }
+            }
+        } -Descending
 
     if (-not $manifestFiles -or $manifestFiles.Count -eq 0) {
         Write-Verbose "No manifest files found for '$InstanceName'."

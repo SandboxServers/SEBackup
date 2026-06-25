@@ -82,6 +82,13 @@ function Test-SEBChainIntegrity {
     $tempDir = $null
 
     try {
+        # InstanceName becomes a directory segment (<BackupRoot>/<InstanceName>); reject any path
+        # traversal so a crafted instance name cannot redirect reads/extraction outside BackupRoot.
+        if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or [System.IO.Path]::IsPathRooted($InstanceName)) {
+            $result.ErrorMessage = "Invalid InstanceName '$InstanceName': path separators and traversal are not allowed."
+            return $result
+        }
+
         Write-Verbose "IntegrityManager: Level 3 chain integrity check for instance '$InstanceName'"
 
         if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
@@ -116,16 +123,18 @@ function Test-SEBChainIntegrity {
         $archiveResults = [System.Collections.Generic.List[PSCustomObject]]::new()
         $allArchivesPassed = $true
 
+        $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
         foreach ($manifest in $chain) {
-            $archivePath = $manifest.archive_path
-            $manifestPath = $manifest._manifest_path  # Internal path set by Get-SEBManifestChain
+            # Resolve archive_path to the full path under <BackupRoot>/<Instance>/<type>/, with
+            # traversal guards (archive_path/type are attacker-controllable manifest data) and a
+            # fallback for legacy manifests that predate the archive_path field.
+            $archivePath = Resolve-SEBChainArchivePath -Manifest $manifest -InstanceDir $instanceDir
 
-            # If the manifest object doesn't carry its own path, derive it
-            if (-not $manifestPath) {
-                $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
-                $manifestFileName = [System.IO.Path]::GetFileNameWithoutExtension($archivePath) + '.manifest.json'
-                $manifestPath = Join-Path -Path $instanceDir -ChildPath $manifestFileName
+            # Resolve the manifest's own file path from the filename recorded by Read-SEBManifest.
+            $manifestPath = if ($manifest._source_filename) {
+                Join-Path -Path (Join-Path -Path $instanceDir -ChildPath 'manifests') -ChildPath $manifest._source_filename
             }
+            else { $null }
 
             if (-not $archivePath -or -not (Test-Path -Path $archivePath -PathType Leaf)) {
                 $archiveResults.Add([PSCustomObject]@{
@@ -181,7 +190,11 @@ function Test-SEBChainIntegrity {
         Write-Verbose "IntegrityManager: Reconstructing chain in temp directory '$tempDir'"
 
         $fullManifest = $chain[0]
-        $fullArchivePath = $fullManifest.archive_path
+        $fullArchivePath = Resolve-SEBChainArchivePath -Manifest $fullManifest -InstanceDir $instanceDir
+        if (-not $fullArchivePath -or -not (Test-Path -Path $fullArchivePath -PathType Leaf)) {
+            $result.ErrorMessage = "Full backup archive could not be resolved safely for instance '$InstanceName'."
+            return $result
+        }
 
         # Extract the full backup
         Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir
@@ -193,7 +206,11 @@ function Test-SEBChainIntegrity {
         # --- Step 4: Layer each incremental in order ---
         for ($i = 1; $i -lt $chain.Count; $i++) {
             $incManifest = $chain[$i]
-            $incArchivePath = $incManifest.archive_path
+            $incArchivePath = Resolve-SEBChainArchivePath -Manifest $incManifest -InstanceDir $instanceDir
+            if (-not $incArchivePath -or -not (Test-Path -Path $incArchivePath -PathType Leaf)) {
+                $result.ErrorMessage = "Incremental archive $i could not be resolved safely for instance '$InstanceName'."
+                return $result
+            }
 
             Write-Verbose "IntegrityManager: Applying incremental $i of $($chain.Count - 1): $incArchivePath"
 
@@ -218,13 +235,25 @@ function Test-SEBChainIntegrity {
                     Copy-Item -Path $file.FullName -Destination $destPath -Force -ErrorAction Stop
                 }
 
-                # Process deleted files from the incremental manifest
+                # Process deleted files from the incremental manifest. deleted_files is manifest
+                # data, so an entry like '..\..\target' could escape $tempDir after Join-Path and
+                # let Remove-Item delete outside the reconstruction workspace. Constrain every
+                # removal to the temp root.
                 $deletedFiles = $incManifest.deleted_files
                 if ($deletedFiles -and $deletedFiles.Count -gt 0) {
+                    $tempRoot = [System.IO.Path]::GetFullPath($tempDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
                     foreach ($deletedFile in $deletedFiles) {
-                        $deletedPath = Join-Path -Path $tempDir -ChildPath $deletedFile
-                        if (Test-Path -Path $deletedPath) {
-                            Remove-Item -Path $deletedPath -Force -ErrorAction SilentlyContinue
+                        if ([string]::IsNullOrWhiteSpace($deletedFile) -or [System.IO.Path]::IsPathRooted($deletedFile)) {
+                            Write-Verbose "IntegrityManager: skipping unsafe deleted_files entry '$deletedFile'."
+                            continue
+                        }
+                        $deletedPath = [System.IO.Path]::GetFullPath((Join-Path -Path $tempDir -ChildPath $deletedFile))
+                        if (-not $deletedPath.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            Write-Verbose "IntegrityManager: deleted_files entry '$deletedFile' escapes the reconstruction root; skipping."
+                            continue
+                        }
+                        if (Test-Path -LiteralPath $deletedPath) {
+                            Remove-Item -LiteralPath $deletedPath -Force -ErrorAction SilentlyContinue
                         }
                     }
                 }

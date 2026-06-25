@@ -38,7 +38,10 @@ function Deploy-SEBRestoredFiles {
     .OUTPUTS
         PSCustomObject
         An object with: Deployed (bool), PreRestorePath (string),
-        FilesCopied (int), ErrorMessage (string).
+        FilesCopied (int), RolledBack (nullable bool), ErrorMessage (string).
+        RolledBack is $true/$false when a deploy failure triggered a rollback
+        attempt (so callers can distinguish an automatic rollback from a world
+        left needing manual recovery), and $null when no rollback was attempted.
     #>
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
@@ -93,36 +96,55 @@ function Deploy-SEBRestoredFiles {
                 $robocopyExit = $LASTEXITCODE
 
                 if ($robocopyExit -ge 8) {
-                    # Rollback: restore the pre-restore directory
+                    # Roll back to the pre-restore world, and report whether it actually worked.
+                    # Swallowing rollback errors used to claim "Rolled back" while leaving the
+                    # world dir broken or missing.
+                    $rolledBack = $false
                     if ($null -ne $preRestorePath -and (Test-Path -Path $preRestorePath)) {
-                        if (Test-Path -Path $worldDir) {
-                            Remove-Item -Path $worldDir -Recurse -Force -ErrorAction SilentlyContinue
+                        try {
+                            if (Test-Path -Path $worldDir) {
+                                Remove-Item -Path $worldDir -Recurse -Force -ErrorAction Stop
+                            }
+                            Rename-Item -Path $preRestorePath -NewName $worldName -Force -ErrorAction Stop
+                            $rolledBack = $true
                         }
-                        Rename-Item -Path $preRestorePath -NewName $worldName -Force -ErrorAction SilentlyContinue
+                        catch { $rolledBack = $false }
                     }
+                    $rollbackNote = if ($rolledBack) { "Rolled back to the pre-restore world." }
+                        else { "ROLLBACK FAILED -- the pre-restore world is preserved at '$preRestorePath'; restore it manually." }
 
                     return @{
                         Deployed       = $false
                         PreRestorePath = $preRestorePath
+                        RolledBack     = $rolledBack
                         FilesCopied    = 0
-                        Error          = "Robocopy failed with exit code $robocopyExit. Rolled back."
+                        Error          = "Robocopy failed with exit code $robocopyExit. $rollbackNote"
                     }
                 }
             }
             catch {
-                # Rollback
+                $copyError = $_
+                # Roll back to the pre-restore world, reporting whether it actually succeeded.
+                $rolledBack = $false
                 if ($null -ne $preRestorePath -and (Test-Path -Path $preRestorePath)) {
-                    if (Test-Path -Path $worldDir) {
-                        Remove-Item -Path $worldDir -Recurse -Force -ErrorAction SilentlyContinue
+                    try {
+                        if (Test-Path -Path $worldDir) {
+                            Remove-Item -Path $worldDir -Recurse -Force -ErrorAction Stop
+                        }
+                        Rename-Item -Path $preRestorePath -NewName $worldName -Force -ErrorAction Stop
+                        $rolledBack = $true
                     }
-                    Rename-Item -Path $preRestorePath -NewName $worldName -Force -ErrorAction SilentlyContinue
+                    catch { $rolledBack = $false }
                 }
+                $rollbackNote = if ($rolledBack) { "Rolled back to the pre-restore world." }
+                    else { "ROLLBACK FAILED -- the pre-restore world is preserved at '$preRestorePath'; restore it manually." }
 
                 return @{
                     Deployed       = $false
                     PreRestorePath = $preRestorePath
+                    RolledBack     = $rolledBack
                     FilesCopied    = 0
-                    Error          = "Failed to copy files to world dir: $_. Rolled back."
+                    Error          = "Failed to copy files to world dir: $copyError. $rollbackNote"
                 }
             }
 
@@ -174,6 +196,7 @@ function Deploy-SEBRestoredFiles {
             Deployed       = $deployResult.Deployed
             PreRestorePath = $deployResult.PreRestorePath
             FilesCopied    = $deployResult.FilesCopied
+            RolledBack     = $deployResult.RolledBack
             ErrorMessage   = $deployResult.Error
         }
     }
@@ -186,6 +209,7 @@ function Deploy-SEBRestoredFiles {
             Deployed       = $false
             PreRestorePath = $null
             FilesCopied    = 0
+            RolledBack     = $null
             ErrorMessage   = "Deployment exception: $_"
         }
     }

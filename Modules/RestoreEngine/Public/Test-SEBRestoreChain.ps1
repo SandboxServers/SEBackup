@@ -173,7 +173,7 @@ function Test-SEBRestoreChain {
         # Level 1: Archive integrity
         try {
             $level1 = Test-SEBArchiveIntegrity -ArchivePath $archivePath
-            if (-not $level1.Valid) {
+            if (-not $level1.Passed) {
                 $errors.Add("Level 1 integrity FAILED for sequence $seq archive '$archivePath': $($level1.ErrorMessage)")
             }
         }
@@ -184,7 +184,7 @@ function Test-SEBRestoreChain {
         # Level 2: Manifest integrity
         try {
             $level2 = Test-SEBManifestIntegrity -ManifestPath $member.ManifestPath -ArchivePath $archivePath
-            if (-not $level2.Valid) {
+            if (-not $level2.Passed) {
                 $errors.Add("Level 2 integrity FAILED for sequence ${seq}: $($level2.ErrorMessage)")
             }
         }

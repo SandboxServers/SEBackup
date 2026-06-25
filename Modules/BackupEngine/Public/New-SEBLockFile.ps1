@@ -53,6 +53,21 @@ function New-SEBLockFile {
         [int]$StaleThresholdHours = 4
     )
 
+    # InstanceName becomes a filename segment ("<InstanceName>.lock"). Reject path separators,
+    # traversal, rooted paths, wildcards, and other invalid filename characters so a crafted or
+    # mistyped instance name cannot escape Data/lockfiles or be treated as a wildcard.
+    if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or
+        [System.IO.Path]::IsPathRooted($InstanceName) -or
+        $InstanceName -match '[\*\?\[\]]' -or
+        $InstanceName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        return [PSCustomObject]@{
+            Acquired        = $false
+            LockFilePath    = $null
+            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, wildcards, and invalid filename characters are not allowed."
+            StaleLockBroken = $false
+        }
+    }
+
     $projectRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
     $lockDir = Join-Path -Path $projectRoot -ChildPath 'Data' -AdditionalChildPath 'lockfiles'
     $lockFilePath = Join-Path -Path $lockDir -ChildPath "${InstanceName}.lock"
@@ -106,8 +121,28 @@ function New-SEBLockFile {
         instance  = $InstanceName
     }
 
+    # Create the lock file ATOMICALLY: FileMode.CreateNew fails if the file already exists,
+    # so if two runs race past the stale-check above, exactly one wins. A Test-Path-then-write
+    # would let both believe they acquired the lock.
     try {
-        $lockData | ConvertTo-Json -Depth 2 | Set-Content -Path $lockFilePath -Force -ErrorAction Stop
+        $lockJson = $lockData | ConvertTo-Json -Depth 2
+        $fs = [System.IO.File]::Open($lockFilePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($lockJson)
+            $fs.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $fs.Dispose()
+        }
+    }
+    catch [System.IO.IOException] {
+        # Another process created the lock between our check and our create.
+        return [PSCustomObject]@{
+            Acquired        = $false
+            LockFilePath    = $lockFilePath
+            Reason          = "Instance '$InstanceName' lock was acquired by another process concurrently."
+            StaleLockBroken = $staleBroken
+        }
     }
     catch {
         return [PSCustomObject]@{

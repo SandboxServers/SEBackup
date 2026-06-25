@@ -146,7 +146,10 @@ $restorePoints = [System.Collections.Generic.List[object]]::new()
 try {
     # Look for manifest files in the backup directory
     if (Test-Path $instanceBackupDir) {
+        # Exclude '_BAD' artifacts -- a backup renamed '_BAD' failed integrity and must never be
+        # selectable as a restore point.
         $manifestFiles = Get-ChildItem -Path $instanceBackupDir -Filter '*.manifest.json' -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '_BAD\.' } |
             Sort-Object -Property LastWriteTime -Descending
 
         if ($manifestFiles -and $manifestFiles.Count -gt 0) {
@@ -190,6 +193,11 @@ try {
                 $restorePoints.Add([PSCustomObject]@{
                     Index        = $index
                     PointId      = $pointId
+                    # The exact manifest filename (incl. extension). Invoke-SEBRestore ->
+                    # Test-SEBRestoreChain resolves -RestorePoint as a filename in the manifests
+                    # dir without appending an extension, so the call site must pass this, not the
+                    # extension-stripped PointId.
+                    ManifestName = $mf.Name
                     Date         = $timestamp.ToString('yyyy-MM-dd HH:mm:ss')
                     Type         = $backupType
                     Files        = $fileCount
@@ -203,13 +211,14 @@ try {
     # Also check for archive files without manifests
     if (Test-Path $instanceBackupDir) {
         $archiveFiles = Get-ChildItem -Path $instanceBackupDir -Include '*.7z', '*.zip' -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
+            Where-Object { $_.Name -notmatch '_BAD\.' -and $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
             Sort-Object -Property LastWriteTime -Descending
 
         foreach ($af in $archiveFiles) {
             $restorePoints.Add([PSCustomObject]@{
                 Index        = $restorePoints.Count + 1
                 PointId      = $af.BaseName
+                ManifestName = $af.Name
                 Date         = $af.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
                 Type         = 'Archive'
                 Files        = 0
@@ -328,7 +337,7 @@ if (-not $Force) {
 $logContext = $null
 if (Get-Command -Name 'Start-SEBLogContext' -ErrorAction SilentlyContinue) {
     try {
-        $logContext = Start-SEBLogContext -Operation 'Restore'
+        $logContext = Start-SEBLogContext -Context 'Restore'
     }
     catch {
         Write-Verbose "Could not start log context: $_"
@@ -342,29 +351,31 @@ try {
     # ── Step 1: Safety backup ─────────────────────────────────────────────
     if (-not $SkipSafetyBackup) {
         Write-Host '[1/4] Creating safety backup of current world...' -ForegroundColor Yellow
-        try {
-            if (Get-Command -Name 'Invoke-SEBBackup' -ErrorAction SilentlyContinue) {
-                $safetyResult = Invoke-SEBBackup `
-                    -NodeName $NodeName `
-                    -InstanceName $InstanceName `
-                    -ForceFull `
-                    -SkipLoadCheck `
-                    -SkipNotify
 
-                if ($safetyResult -and $safetyResult.Success) {
-                    Write-Host '  [PASS] Safety backup created.' -ForegroundColor Green
-                }
-                else {
-                    Write-Host '  [WARN] Safety backup may have failed. Proceeding with restore.' -ForegroundColor DarkYellow
-                }
-            }
-            else {
-                Write-Host '  [SKIP] BackupEngine not available. No safety backup taken.' -ForegroundColor DarkYellow
-            }
+        # The safety backup is the ONLY recovery point if the restore goes wrong, so a failure
+        # here must abort the restore (the user can opt out explicitly with -SkipSafetyBackup).
+        if (-not (Get-Command -Name 'Invoke-SEBBackup' -ErrorAction SilentlyContinue)) {
+            throw "BackupEngine (Invoke-SEBBackup) is not available, so no safety backup can be taken. Aborting restore. Re-run with -SkipSafetyBackup to bypass this safeguard intentionally."
+        }
+
+        try {
+            $safetyResult = Invoke-SEBBackup `
+                -NodeName $NodeName `
+                -InstanceName $InstanceName `
+                -ForceFull `
+                -SkipLoadCheck `
+                -SkipNotify
         }
         catch {
-            Write-Host "  [WARN] Safety backup error: $_" -ForegroundColor DarkYellow
-            Write-Host '         Proceeding with restore anyway.' -ForegroundColor DarkGray
+            throw "Safety backup threw an error: $_. Aborting restore to preserve the current world. Re-run with -SkipSafetyBackup to bypass."
+        }
+
+        if ($safetyResult -and $safetyResult.Success) {
+            Write-Host '  [PASS] Safety backup created.' -ForegroundColor Green
+        }
+        else {
+            $safetyError = if ($safetyResult) { $safetyResult.ErrorMessage } else { 'no result returned' }
+            throw "Safety backup failed ($safetyError). Aborting restore so the current world is not left without a recovery point. Re-run with -SkipSafetyBackup to bypass this safeguard."
         }
     }
     else {
@@ -387,11 +398,13 @@ try {
     Write-Host "  Source: $($selectedPoint.ManifestPath)" -ForegroundColor DarkGray
 
     if (Get-Command -Name 'Invoke-SEBRestore' -ErrorAction SilentlyContinue) {
+        # Pass the full manifest filename (incl. extension). Test-SEBRestoreChain resolves
+        # -RestorePoint as a filename in the manifests dir without appending an extension, so the
+        # extension-stripped PointId would point at a non-existent file and fail chain validation.
         $restoreResult = Invoke-SEBRestore `
             -NodeName $NodeName `
             -InstanceName $InstanceName `
-            -RestorePoint $selectedPoint.PointId `
-            -ManifestPath $selectedPoint.ManifestPath
+            -RestorePoint $selectedPoint.ManifestName
 
         if ($restoreResult -and $restoreResult.Success) {
             $restoreSuccess = $true

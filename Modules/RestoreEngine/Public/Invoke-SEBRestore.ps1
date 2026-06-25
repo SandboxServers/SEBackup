@@ -89,6 +89,7 @@ function Invoke-SEBRestore {
     $overallStart = Get-Date
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
     $warnings = [System.Collections.Generic.List[string]]::new()
+    $lockAcquired = $false
 
     $result = [PSCustomObject]@{
         Success          = $false
@@ -101,6 +102,20 @@ function Invoke-SEBRestore {
     }
 
     try {
+        # ====================================================================
+        # STEP 0: Acquire the per-instance lock. This is the SAME lock the backup
+        # engine uses, so a restore cannot run concurrently with a scheduled backup
+        # (or another restore) of the same instance and corrupt the world mid-write.
+        # ====================================================================
+        $lockResult = New-SEBLockFile -InstanceName $InstanceName
+        if (-not $lockResult.Acquired) {
+            throw "Could not acquire lock for restore of '$InstanceName': $($lockResult.Reason)"
+        }
+        $lockAcquired = $true
+        if ($lockResult.StaleLockBroken) {
+            $warnings.Add("A stale lock was broken before the restore acquired its lock.")
+        }
+
         # ====================================================================
         # STEP 1: Load configs, create session
         # ====================================================================
@@ -174,12 +189,18 @@ function Invoke-SEBRestore {
             }
 
             try {
+                # The restore already holds the per-instance lock (STEP 0) and owns the cached
+                # node session (STEP 1). Pass -SkipLock so the nested backup does not deadlock on
+                # the lock we hold, and -KeepSession so its finally does not Remove-SEBSession the
+                # session this restore keeps using for the (destructive) steps that follow.
                 $safetyResult = Invoke-SEBBackup `
                     -NodeName     $NodeName `
                     -InstanceName $InstanceName `
                     -ForceFull `
                     -SkipLoadCheck `
-                    -SkipNotify
+                    -SkipNotify `
+                    -SkipLock `
+                    -KeepSession
 
                 if ($safetyResult.Success) {
                     $result.SafetyBackupPath = $safetyResult.ArchiveFile
@@ -188,46 +209,24 @@ function Invoke-SEBRestore {
                     }
                 }
                 else {
-                    $warnings.Add("Safety backup completed with issues: $($safetyResult.ErrorMessage)")
-                    if ($hasLogger) {
-                        Write-SEBLog -Message "Safety backup had issues: $($safetyResult.ErrorMessage)" -Level WARN -Context $InstanceName
-                    }
+                    # The safety backup is the only recovery point if the restore goes wrong, so a
+                    # failure must abort BEFORE the live world is touched. -SkipSafetyBackup is the
+                    # explicit opt-out for anyone who really wants to proceed without one.
+                    throw "Safety backup failed: $($safetyResult.ErrorMessage). Aborting restore so the current world keeps a recovery point. Re-run with -SkipSafetyBackup to bypass."
                 }
             }
             catch {
-                $warnings.Add("Safety backup failed: $_. Proceeding with restore anyway.")
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Safety backup failed: $_. Proceeding." -Level WARN -Context $InstanceName
-                }
+                throw "Safety backup failed; aborting restore before any live world changes: $($_.Exception.Message). Re-run with -SkipSafetyBackup to bypass."
             }
         }
         else {
             $warnings.Add("Safety backup was skipped (SkipSafetyBackup specified).")
         }
 
-        # ====================================================================
-        # STEP 5: Stop Torch server
-        # ====================================================================
-        if ($hasLogger) {
-            Write-SEBLog -Message "Stopping Torch server..." -Level INFO -Context $InstanceName
-        }
-
-        $stopResult = Stop-SEBTorchServer `
-            -Session        $session `
-            -InstanceConfig $instanceConfig `
-            -NodeConfig     $nodeConfig
-
-        if (-not $stopResult.Stopped) {
-            if ($stopResult.Method -eq 'manual') {
-                $warnings.Add("Server must be stopped manually: $($stopResult.ErrorMessage)")
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Manual server stop required. Proceeding assuming server is stopped." -Level WARN -Context $InstanceName
-                }
-            }
-            else {
-                throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
-            }
-        }
+        # NOTE: stopping the Torch server is deferred until AFTER reconstruction is verified
+        # (STEP 7b below). Reconstruction and verification happen in a temp dir and don't need the
+        # server down; stopping first meant a failed verification left the world intact but the
+        # server offline. Stop only once we know we have a good reconstruction to deploy.
 
         # ====================================================================
         # STEP 6: Reconstruct in temp working directory
@@ -297,7 +296,9 @@ function Invoke-SEBRestore {
                 $sharePath = Get-SEBSharePath -NodeConfig $shareNodeConfig -InstanceConfig $shareInstanceConfig
 
                 $shareDestPath = Join-Path -Path $sharePath -ChildPath "restore_temp_$(Split-Path -Path $archivePath -Leaf)"
-                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -Config $globalConfig.network
+                $netBandwidthMbps = if ($globalConfig.network.max_bandwidth_mbps) { [int]$globalConfig.network.max_bandwidth_mbps } else { 0 }
+                $netRobocopyIpgMs = if ($globalConfig.network.robocopy_ipg_ms) { [int]$globalConfig.network.robocopy_ipg_ms } else { 0 }
+                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -MaxBandwidthMbps $netBandwidthMbps -RobocopyIpgMs $netRobocopyIpgMs
 
                 # Get the local path on the node for the archive
                 $nodeArchiveTempPath = Invoke-Command -Session $session -ScriptBlock {
@@ -433,16 +434,41 @@ function Invoke-SEBRestore {
         } -ArgumentList $tempRestoreDir, $targetManifest['files'] -ErrorAction Stop
 
         if ($verifyResult.Mismatches.Count -gt 0) {
+            # The reconstructed world does not match the manifest. Abort BEFORE deploy so the
+            # live world (and the pre-restore safety backup) remain intact -- deploying a
+            # known-corrupt reconstruction is the worst possible outcome for a restore tool.
             $mismatchSample = $verifyResult.Mismatches | Select-Object -First 5
-            $warnMsg = "Reconstruction verification found $($verifyResult.Mismatches.Count) mismatch(es): $($mismatchSample -join '; ')"
-            $warnings.Add($warnMsg)
-            if ($hasLogger) {
-                Write-SEBLog -Message $warnMsg -Level WARN -Context $InstanceName
-            }
+            throw "Reconstruction verification failed with $($verifyResult.Mismatches.Count) mismatch(es); aborting before deploy to avoid restoring a corrupt world. Samples: $($mismatchSample -join '; ')"
         }
         else {
             if ($hasLogger) {
                 Write-SEBLog -Message "Reconstruction verified: $($verifyResult.Checked)/$($verifyResult.Total) files match." -Level INFO -Context $InstanceName
+            }
+        }
+
+        # ====================================================================
+        # STEP 7b: Stop Torch server (deferred from STEP 5)
+        # Only now -- with a verified reconstruction ready to deploy -- do we take the server
+        # down. If anything above failed/aborted, the server was never stopped.
+        # ====================================================================
+        if ($hasLogger) {
+            Write-SEBLog -Message "Stopping Torch server..." -Level INFO -Context $InstanceName
+        }
+
+        $stopResult = Stop-SEBTorchServer `
+            -Session        $session `
+            -InstanceConfig $instanceConfig `
+            -NodeConfig     $nodeConfig
+
+        if (-not $stopResult.Stopped) {
+            if ($stopResult.Method -eq 'manual') {
+                $warnings.Add("Server must be stopped manually: $($stopResult.ErrorMessage)")
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Manual server stop required. Proceeding assuming server is stopped." -Level WARN -Context $InstanceName
+                }
+            }
+            else {
+                throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
             }
         }
 
@@ -502,13 +528,14 @@ function Invoke-SEBRestore {
         # ====================================================================
         if ($globalConfig.notifications.enabled) {
             try {
-                Send-SEBBackupNotification -BackupResult ([PSCustomObject]@{
-                    Success      = $true
-                    InstanceName = $InstanceName
-                    NodeName     = $NodeName
-                    BackupType   = "RESTORE to $RestorePoint"
-                    Duration     = (Get-Date) - $overallStart
-                }) -GlobalConfig $globalConfig
+                # Use the restore notifier (honors the notifications.on_restore gate) and pass the
+                # now-mandatory -InstanceName. The previous call routed through the *backup*
+                # notifier without -InstanceName, so every successful restore threw a
+                # ParameterBindingException and silently sent nothing.
+                Send-SEBRestoreNotification `
+                    -InstanceName $InstanceName `
+                    -RestorePoint $RestorePoint `
+                    -GlobalConfig $globalConfig
             }
             catch {
                 $warnings.Add("Failed to send restore notification: $_")
@@ -552,6 +579,12 @@ function Invoke-SEBRestore {
 
         if ($hasLogger) {
             Write-SEBLog -Message "=== Restore FAILED for '$InstanceName': $($_.Exception.Message) ===" -Level ERROR -Context $InstanceName
+        }
+    }
+    finally {
+        # Always release the instance lock.
+        if ($lockAcquired) {
+            Remove-SEBLockFile -InstanceName $InstanceName | Out-Null
         }
     }
 

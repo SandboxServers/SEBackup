@@ -37,8 +37,7 @@ function Test-SEBCredential {
         [string]$NodeName
     )
 
-    $credentialDir = Resolve-CredentialPath
-    $credentialFile = Join-Path -Path $credentialDir -ChildPath "$NodeName.cred.xml"
+    $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
     if (-not (Test-Path -Path $credentialFile)) {
         Write-Verbose "Credential file not found for node '$NodeName': $credentialFile"

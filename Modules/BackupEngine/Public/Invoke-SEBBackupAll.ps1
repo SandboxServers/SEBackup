@@ -47,6 +47,9 @@ function Invoke-SEBBackupAll {
     [OutputType([PSCustomObject[]])]
     param(
         [Parameter()]
+        [switch]$ForceFull,
+
+        [Parameter()]
         [switch]$SkipLoadCheck,
 
         [Parameter()]
@@ -58,6 +61,11 @@ function Invoke-SEBBackupAll {
 
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
     $allResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # The root manifest path, so parallel runspaces (which do NOT inherit the caller's
+    # imported modules) can re-import SEBackup before calling Invoke-SEBBackup.
+    $sebRepoRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
+    $sebManifestPath = Join-Path -Path $sebRepoRoot -ChildPath 'SEBackup.psd1'
 
     if ($hasLogger) {
         Write-SEBLog -Message '=== Starting backup-all operation ===' -Level INFO
@@ -151,6 +159,9 @@ function Invoke-SEBBackupAll {
             $nodeName = $nodeGroup.Name
             $nodeResults = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+            # Parallel runspaces start clean: import SEBackup so Invoke-SEBBackup exists here.
+            Import-Module $using:sebManifestPath -Force -DisableNameChecking -ErrorAction Stop
+
             # Process instances on this node serially
             foreach ($workItem in $nodeGroup.Group) {
                 try {
@@ -158,6 +169,7 @@ function Invoke-SEBBackupAll {
                         NodeName     = $workItem.NodeName
                         InstanceName = $workItem.InstanceName
                     }
+                    if ($using:ForceFull)     { $backupParams['ForceFull']     = $true }
                     if ($using:SkipLoadCheck) { $backupParams['SkipLoadCheck'] = $true }
                     if ($using:SkipNotify)    { $backupParams['SkipNotify']    = $true }
 
@@ -204,6 +216,7 @@ function Invoke-SEBBackupAll {
                     NodeName     = $workItem.NodeName
                     InstanceName = $workItem.InstanceName
                 }
+                if ($ForceFull)     { $backupParams['ForceFull']     = $true }
                 if ($SkipLoadCheck) { $backupParams['SkipLoadCheck'] = $true }
                 if ($SkipNotify)    { $backupParams['SkipNotify']    = $true }
 

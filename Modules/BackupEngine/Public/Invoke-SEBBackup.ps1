@@ -80,7 +80,19 @@ function Invoke-SEBBackup {
         [switch]$SkipLoadCheck,
 
         [Parameter()]
-        [switch]$SkipNotify
+        [switch]$SkipNotify,
+
+        # Skip acquiring the per-instance lock. For re-entrant callers (e.g. Invoke-SEBRestore's
+        # safety backup) that already hold the instance lock -- taking it again against the
+        # atomic CreateNew lock would fail and abort the nested backup.
+        [Parameter()]
+        [switch]$SkipLock,
+
+        # Do not tear down the node PSSession in the finally block. For callers that own the
+        # session lifecycle and keep using the (cached) session after this call returns;
+        # Remove-SEBSession would otherwise close the session out from under them.
+        [Parameter()]
+        [switch]$KeepSession
     )
 
     $overallStart = Get-Date
@@ -135,16 +147,21 @@ function Invoke-SEBBackup {
         }
 
         # ========================================================================
-        # STEP 3: Acquire lock file
+        # STEP 3: Acquire lock file (unless the caller already holds it)
         # ========================================================================
-        $lockResult = New-SEBLockFile -InstanceName $InstanceName
-        if (-not $lockResult.Acquired) {
-            throw "Could not acquire lock: $($lockResult.Reason)"
+        if (-not $SkipLock) {
+            $lockResult = New-SEBLockFile -InstanceName $InstanceName
+            if (-not $lockResult.Acquired) {
+                throw "Could not acquire lock: $($lockResult.Reason)"
+            }
+            $lockAcquired = $true
+            if ($lockResult.StaleLockBroken -and $hasLogger) {
+                Write-SEBLog -Message "Stale lock was broken for '$InstanceName'." -Level WARN -Context $InstanceName
+                $warnings.Add("Stale lock was broken before acquiring new lock.")
+            }
         }
-        $lockAcquired = $true
-        if ($lockResult.StaleLockBroken -and $hasLogger) {
-            Write-SEBLog -Message "Stale lock was broken for '$InstanceName'." -Level WARN -Context $InstanceName
-            $warnings.Add("Stale lock was broken before acquiring new lock.")
+        elseif ($hasLogger) {
+            Write-SEBLog -Message "Skipping lock acquisition (-SkipLock); caller already holds the lock for '$InstanceName'." -Level INFO -Context $InstanceName
         }
 
         # ========================================================================
@@ -156,13 +173,13 @@ function Invoke-SEBBackup {
                 Write-SEBLog -Message "Running load awareness check for '$NodeName'..." -Level INFO -Context $InstanceName
             }
 
-            $loadCheck = Test-SEBNodeLoad -Session $session -Config $globalConfig.load_awareness
-            if (-not $loadCheck.Safe) {
+            $loadCheck = Test-SEBNodeLoad -Session $session -InstanceConfig $instanceConfig -GlobalConfig $globalConfig
+            if (-not $loadCheck.CanProceed) {
                 if ($hasLogger) {
                     Write-SEBLog -Message "Node '$NodeName' is under high load. Waiting for safe conditions..." -Level WARN -Context $InstanceName
                 }
-                $waitResult = Wait-SEBNodeLoad -Session $session -Config $globalConfig.load_awareness
-                if (-not $waitResult.Proceeded) {
+                $waitResult = Wait-SEBNodeLoad -Session $session -InstanceConfig $instanceConfig -GlobalConfig $globalConfig
+                if (-not $waitResult.CanProceed) {
                     throw "Load awareness: backup deferred. Node '$NodeName' did not reach safe load levels within the maximum backoff period."
                 }
                 $warnings.Add("Backup was delayed by $([math]::Round($waitResult.WaitedSeconds, 0))s due to high node load.")
@@ -287,118 +304,127 @@ function Invoke-SEBBackup {
         $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $typeLabel = if ($backupType -eq 'full') { 'FULL' } else { 'INC' }
 
-        # Determine compression extension
-        $compExt = if ($globalConfig.compression.engine -eq '7zip') { '.7z' } else { '.zip' }
+        # Resolve the effective compression engine and level once so the archive extension,
+        # the compression step, and restore all agree. An 'auto' engine that silently
+        # resolved differently on different machines produced mismatched / unrestorable archives.
+        $configEngine = if ($globalConfig.compression.engine) { $globalConfig.compression.engine } else { 'auto' }
+        $compressionLevel = if ($globalConfig.compression.level_7zip) { [int]$globalConfig.compression.level_7zip } else { 5 }
+        $resolvedEngine = $configEngine
+        if ($resolvedEngine -eq 'auto') {
+            # Get-SEBCompressionEngine returns a PSCustomObject (@{Engine;Version;Path}); take the
+            # .Engine name. Assigning the whole object made $compExt always choose '.zip' and made
+            # Compress-SEBArchive -Engine (a [ValidateSet] string) throw, failing every auto backup.
+            try {
+                $engineInfo = Get-SEBCompressionEngine -Session $session
+                $resolvedEngine = if ($engineInfo -is [string]) { $engineInfo } else { $engineInfo.Engine }
+                if ([string]::IsNullOrWhiteSpace($resolvedEngine)) { $resolvedEngine = 'dotnet' }
+            }
+            catch { $resolvedEngine = 'dotnet' }
+        }
+        $compExt = if ($resolvedEngine -eq '7zip') { '.7z' } else { '.zip' }
         $archiveFileName = "${InstanceName}_${typeLabel}_${timestamp}${compExt}"
 
-        # Get the volume letter from the world path for VSS
-        $volumeLetter = Invoke-Command -Session $session -ScriptBlock {
+        # Resolve the volume root and the world path relative to it on the node, up front,
+        # so the remote VSS block stays self-contained (no nested remoting, no C&C state).
+        $pathInfo = Invoke-Command -Session $session -ScriptBlock {
             param($wPath)
-            (Split-Path -Path $wPath -Qualifier).TrimEnd(':')
+            $qualifier = Split-Path -Path $wPath -Qualifier
+            @{
+                VolumeRoot    = "$qualifier\"
+                WorldRelative = $wPath.Substring($qualifier.Length).TrimStart('\', '/')
+            }
         } -ArgumentList $worldPath -ErrorAction Stop
+        $volumeRoot = $pathInfo.VolumeRoot
+        $worldRelative = $pathInfo.WorldRelative
 
-        $manifest = $null
-        $manifestDiff = $null
-        $archivePath = $null
-
-        # VSS lifecycle with try/finally
-        Invoke-SEBWithShadowCopy -Session $session -VolumeLetter $volumeLetter -ScriptBlock {
-            param($ShadowMountPath)
-
-            # Compute the relative portion of world_path beneath the volume root
-            $worldRelative = Invoke-Command -Session $session -ScriptBlock {
-                param($wPath)
-                $qualifier = Split-Path -Path $wPath -Qualifier
-                $wPath.Substring($qualifier.Length).TrimStart('\', '/')
-            } -ArgumentList $worldPath -ErrorAction Stop
-
-            $vssScanPath = Join-Path -Path $ShadowMountPath -ChildPath $worldRelative
-
-            if ($hasLogger) {
-                Write-SEBLog -Message "VSS shadow copy mounted. Scanning: $vssScanPath" -Level INFO -Context $InstanceName
-            }
-
-            # --- Generate manifest ---
-            $previousManifest = $backupDecision.LastManifest
-            $script:manifest = New-SEBManifest `
-                -SourcePath       $vssScanPath `
-                -PreviousManifest $previousManifest `
-                -Session          $session
-
-            $result.FileCount = $script:manifest['files'].Count
-
-            # --- For incremental: compare manifests to get diff ---
-            $filesToCopy = $null
-            if ($backupType -eq 'incremental') {
-                $script:manifestDiff = Compare-SEBManifest `
-                    -CurrentManifest  $script:manifest `
-                    -PreviousManifest $previousManifest
-
-                $filesToCopy = @($script:manifestDiff.Added) + @($script:manifestDiff.Modified)
-
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Incremental diff: $($script:manifestDiff.AddedCount) added, $($script:manifestDiff.ModifiedCount) modified, $($script:manifestDiff.DeletedCount) deleted, $($script:manifestDiff.UnchangedCount) unchanged." -Level INFO -Context $InstanceName
-                }
-
-                # If no changes, still produce an incremental with just the manifest
-                if ($script:manifestDiff.TotalChanges -eq 0) {
-                    $warnings.Add("No file changes detected since last backup. Incremental archive will contain only the manifest.")
-                    if ($hasLogger) {
-                        Write-SEBLog -Message "No changes detected. Creating minimal incremental backup." -Level INFO -Context $InstanceName
-                    }
-                }
-            }
-
-            # --- Copy files from VSS mount to node staging dir ---
-            if ($hasLogger) {
-                Write-SEBLog -Message "Copying files from VSS mount to staging: $nodeStagingDir" -Level INFO -Context $InstanceName
-            }
-
-            Invoke-Command -Session $session -ScriptBlock {
-                param($sourceDir, $destDir, $isIncremental, $changedFiles)
-
-                # Ensure staging directory exists and is clean
-                if (Test-Path -Path $destDir -PathType Container) {
-                    Remove-Item -Path $destDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-                New-Item -Path $destDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-
-                if ($isIncremental -and $null -ne $changedFiles -and $changedFiles.Count -gt 0) {
-                    # Copy only changed files (added + modified)
-                    foreach ($relPath in $changedFiles) {
-                        $srcFile = Join-Path -Path $sourceDir -ChildPath ($relPath.Replace('/', '\'))
-                        $dstFile = Join-Path -Path $destDir -ChildPath ($relPath.Replace('/', '\'))
-                        $dstFileDir = Split-Path -Path $dstFile -Parent
-
-                        if (-not (Test-Path -Path $dstFileDir -PathType Container)) {
-                            New-Item -Path $dstFileDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-                        }
-
-                        if (Test-Path -Path $srcFile -PathType Leaf) {
-                            Copy-Item -Path $srcFile -Destination $dstFile -Force -ErrorAction Stop
-                        }
-                    }
-                }
-                else {
-                    # Full backup: copy everything with robocopy for performance
-                    $robocopyArgs = @($sourceDir, $destDir, '/E', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/MT:4')
-                    $robocopyResult = & robocopy @robocopyArgs
-                    $robocopyExit = $LASTEXITCODE
-
-                    # Robocopy exit codes 0-7 indicate success (with various copy/skip counts)
-                    if ($robocopyExit -ge 8) {
-                        throw "Robocopy failed with exit code $robocopyExit during staging copy."
-                    }
-                }
-            } -ArgumentList $vssScanPath, $nodeStagingDir, ($backupType -eq 'incremental'), $filesToCopy -ErrorAction Stop
+        $vssMountBase = if ($globalConfig.defaults -and $globalConfig.defaults.vss -and $globalConfig.defaults.vss.mount_base) {
+            $globalConfig.defaults.vss.mount_base
+        }
+        else {
+            'C:\SEBackup\vss_mount'
         }
 
-        # Retrieve manifest from script scope (set inside VSS block)
-        $manifest = $script:manifest
-        $manifestDiff = $script:manifestDiff
+        if ($hasLogger) {
+            Write-SEBLog -Message "Capturing consistent snapshot of '$worldPath' via VSS into staging '$nodeStagingDir'..." -Level INFO -Context $InstanceName
+        }
+
+        # STEP 8: Capture the world into node staging from a VSS snapshot. The script block
+        # runs on the NODE (Invoke-SEBWithShadowCopy uses Invoke-Command -Session), so it does
+        # only node-local work and receives everything it needs through -ArgumentList.
+        Invoke-SEBWithShadowCopy `
+            -Session   $session `
+            -Volume    $volumeRoot `
+            -MountBase $vssMountBase `
+            -ScriptBlock {
+                param($ShadowMountPath, $RelativePath, $DestDir)
+
+                $scanPath = Join-Path -Path $ShadowMountPath -ChildPath $RelativePath
+
+                if (Test-Path -Path $DestDir -PathType Container) {
+                    Remove-Item -Path $DestDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                New-Item -Path $DestDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+
+                $robocopyArgs = @($scanPath, $DestDir, '/E', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/MT:4')
+                & robocopy @robocopyArgs | Out-Null
+                if ($LASTEXITCODE -ge 8) {
+                    throw "Robocopy failed with exit code $LASTEXITCODE during VSS staging copy."
+                }
+            } `
+            -ArgumentList @($worldRelative, $nodeStagingDir)
+
+        # STEP 9: Generate the manifest on the C&C from the captured staging copy
+        # (New-SEBManifest reaches the node through the session). Only pass the previous
+        # manifest for an incremental; passing it for a full would record the full as an
+        # incremental and corrupt the chain metadata.
+        $previousManifest = if ($backupType -eq 'incremental') { $backupDecision.LastManifest } else { $null }
+
+        $manifestParams = @{
+            SourcePath = $nodeStagingDir
+            Session    = $session
+        }
+        if ($null -ne $previousManifest) {
+            $manifestParams['PreviousManifest'] = $previousManifest
+        }
+        $manifest = New-SEBManifest @manifestParams
 
         if ($null -eq $manifest) {
-            throw "Manifest generation failed inside VSS scope."
+            throw "Manifest generation failed for staging path '$nodeStagingDir'."
+        }
+        $result.FileCount = $manifest['files'].Count
+
+        # For an incremental, diff against the parent and prune staging down to only the
+        # changed files so the archive carries just the delta.
+        $manifestDiff = $null
+        if ($backupType -eq 'incremental' -and $null -ne $previousManifest) {
+            $manifestDiff = Compare-SEBManifest -CurrentManifest $manifest -PreviousManifest $previousManifest
+
+            if ($hasLogger) {
+                Write-SEBLog -Message "Incremental diff: $($manifestDiff.AddedCount) added, $($manifestDiff.ModifiedCount) modified, $($manifestDiff.DeletedCount) deleted, $($manifestDiff.UnchangedCount) unchanged." -Level INFO -Context $InstanceName
+            }
+
+            $changedFiles = @($manifestDiff.Added) + @($manifestDiff.Modified)
+            if ($changedFiles.Count -eq 0) {
+                $warnings.Add("No file changes detected since last backup. The incremental archive will be empty (the manifest is stored separately in the manifests directory).")
+                if ($hasLogger) {
+                    Write-SEBLog -Message "No changes detected. Creating minimal incremental backup." -Level INFO -Context $InstanceName
+                }
+            }
+
+            # Prune unchanged files from staging on the node.
+            Invoke-Command -Session $session -ScriptBlock {
+                param($StagingDir, $KeepRelative)
+                $keep = [System.Collections.Generic.HashSet[string]]::new(
+                    [string[]]@($KeepRelative | ForEach-Object { $_.Replace('/', '\') }),
+                    [System.StringComparer]::OrdinalIgnoreCase)
+                $root = $StagingDir.TrimEnd('\', '/')
+                Get-ChildItem -Path $StagingDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                    $rel = $_.FullName.Substring($root.Length + 1)
+                    if (-not $keep.Contains($rel)) {
+                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } -ArgumentList @($nodeStagingDir, $changedFiles) -ErrorAction Stop
         }
 
         # ========================================================================
@@ -411,10 +437,11 @@ function Invoke-SEBBackup {
         $nodeArchivePath = Join-Path -Path $nodeStagingBase -ChildPath $archiveFileName
 
         Compress-SEBArchive `
-            -SourcePath  $nodeStagingDir `
-            -Destination $nodeArchivePath `
-            -Session     $session `
-            -Config      $globalConfig.compression
+            -SourcePath       $nodeStagingDir `
+            -DestinationPath  $nodeArchivePath `
+            -Session          $session `
+            -Engine           $resolvedEngine `
+            -CompressionLevel $compressionLevel
 
         # Get archive size from node
         $archiveInfo = Invoke-Command -Session $session -ScriptBlock {
@@ -470,10 +497,14 @@ function Invoke-SEBBackup {
             Write-SEBLog -Message "Transferring archive from '$shareArchivePath' to C&C '$ccArchivePath'..." -Level INFO -Context $InstanceName
         }
 
+        $netBandwidthMbps = if ($globalConfig.network.max_bandwidth_mbps) { [int]$globalConfig.network.max_bandwidth_mbps } else { 0 }
+        $netRobocopyIpgMs = if ($globalConfig.network.robocopy_ipg_ms) { [int]$globalConfig.network.robocopy_ipg_ms } else { 0 }
+
         Copy-SEBThrottled `
-            -Source      $shareArchivePath `
-            -Destination $ccArchivePath `
-            -Config      $globalConfig.network
+            -Source           $shareArchivePath `
+            -Destination      $ccArchivePath `
+            -MaxBandwidthMbps $netBandwidthMbps `
+            -RobocopyIpgMs    $netRobocopyIpgMs
 
         $result.ArchiveFile = $ccArchivePath
 
@@ -481,7 +512,14 @@ function Invoke-SEBBackup {
         $manifestFileName = "${InstanceName}_${typeLabel}_${timestamp}.json"
         $ccManifestPath = Join-Path -Path $ccManifestDir -ChildPath $manifestFileName
 
-        $manifest | ConvertTo-Json -Depth 10 | Set-Content -Path $ccManifestPath -Force -ErrorAction Stop
+        # Record the archive so Write-SEBManifest can embed archive_sha256 / archive_size_bytes
+        # (used by Level-2/Level-3 integrity and by restore-time verification). archive_path is
+        # the archive's filename relative to the manifest; _archive_path is the local full path
+        # used only to compute the hash and is stripped from the written JSON.
+        $manifest['archive_path'] = $archiveFileName
+        $manifest['_archive_path'] = $ccArchivePath
+
+        Write-SEBManifest -Manifest $manifest -Path $ccManifestPath
         $result.ManifestFile = $ccManifestPath
         $result.ChainId = $manifest['chain_id']
         $result.ChainSequence = $manifest['chain_sequence']
@@ -491,51 +529,16 @@ function Invoke-SEBBackup {
         }
 
         # ========================================================================
-        # STEP 12: Copy to NAS (warn if unreachable, don't abort)
-        # ========================================================================
-        $nasPath = $globalConfig.storage.nas_backup_path
-        if (-not [string]::IsNullOrWhiteSpace($nasPath)) {
-            try {
-                $nasInstanceDir = Join-Path -Path $nasPath -ChildPath $InstanceName
-                $nasTypeDir = Join-Path -Path $nasInstanceDir -ChildPath $backupType
-
-                if (-not (Test-Path -Path $nasTypeDir -PathType Container)) {
-                    New-Item -Path $nasTypeDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-                }
-
-                $nasArchivePath = Join-Path -Path $nasTypeDir -ChildPath $archiveFileName
-
-                if ($hasLogger) {
-                    Write-SEBLog -Message "Copying archive to NAS: $nasArchivePath" -Level INFO -Context $InstanceName
-                }
-
-                Copy-SEBThrottled `
-                    -Source      $ccArchivePath `
-                    -Destination $nasArchivePath `
-                    -Config      $globalConfig.network
-
-                if ($hasLogger) {
-                    Write-SEBLog -Message "NAS copy completed." -Level INFO -Context $InstanceName
-                }
-            }
-            catch {
-                $nasWarn = "Failed to copy archive to NAS: $_"
-                $warnings.Add($nasWarn)
-                if ($hasLogger) {
-                    Write-SEBLog -Message $nasWarn -Level WARN -Context $InstanceName
-                }
-            }
-        }
-
-        # ========================================================================
         # STEP 13: Integrity checks (Level 1 + Level 2)
+        # NOTE: the NAS copy was intentionally moved to AFTER these checks (STEP 12b below) so a
+        # corrupt archive that fails integrity is never published to NAS under its normal name.
         # ========================================================================
         $integrityPassed = $true
 
         # Level 1: Archive integrity (CRC/hash check)
         try {
             $level1Result = Test-SEBArchiveIntegrity -ArchivePath $ccArchivePath
-            if (-not $level1Result.Valid) {
+            if (-not $level1Result.Passed) {
                 $integrityPassed = $false
                 $warnings.Add("Level 1 integrity check FAILED for archive: $($level1Result.ErrorMessage)")
                 if ($hasLogger) {
@@ -559,7 +562,7 @@ function Invoke-SEBBackup {
         # Level 2: Manifest integrity (cross-check manifest vs archive contents)
         try {
             $level2Result = Test-SEBManifestIntegrity -ManifestPath $ccManifestPath -ArchivePath $ccArchivePath
-            if (-not $level2Result.Valid) {
+            if (-not $level2Result.Passed) {
                 $integrityPassed = $false
                 $warnings.Add("Level 2 integrity check FAILED: $($level2Result.ErrorMessage)")
                 if ($hasLogger) {
@@ -583,7 +586,10 @@ function Invoke-SEBBackup {
         $result.IntegrityPassed = $integrityPassed
 
         if (-not $integrityPassed) {
-            # Mark backup as BAD by renaming with _BAD suffix
+            # Mark the backup as BAD by renaming with a _BAD suffix. Rename the manifest to
+            # match so the pair stays together: otherwise the retention orphan sweep sees a
+            # manifest with no same-named archive and deletes it, and Get-SEBBackupType would
+            # otherwise treat the failed backup as a valid chain parent.
             $badArchivePath = $ccArchivePath -replace '(\.\w+)$', '_BAD$1'
             try {
                 Rename-Item -Path $ccArchivePath -NewName (Split-Path -Path $badArchivePath -Leaf) -Force -ErrorAction Stop
@@ -591,6 +597,57 @@ function Invoke-SEBBackup {
             }
             catch {
                 $warnings.Add("Failed to rename failed archive to BAD: $_")
+            }
+
+            if (Test-Path -Path $ccManifestPath -PathType Leaf) {
+                $badManifestPath = $ccManifestPath -replace '(\.json)$', '_BAD$1'
+                try {
+                    Rename-Item -Path $ccManifestPath -NewName (Split-Path -Path $badManifestPath -Leaf) -Force -ErrorAction Stop
+                    $result.ManifestFile = $badManifestPath
+                }
+                catch {
+                    $warnings.Add("Failed to rename failed manifest to BAD: $_")
+                }
+            }
+        }
+
+        # ========================================================================
+        # STEP 12b: Copy to NAS -- ONLY after integrity passes (warn if unreachable, don't abort)
+        # Running this after the integrity checks keeps a corrupt archive (which is renamed _BAD
+        # above) from ever being published to NAS under its normal, restore-selectable name.
+        # ========================================================================
+        $nasPath = $globalConfig.storage.nas_backup_path
+        if ($integrityPassed -and -not [string]::IsNullOrWhiteSpace($nasPath)) {
+            try {
+                $nasInstanceDir = Join-Path -Path $nasPath -ChildPath $InstanceName
+                $nasTypeDir = Join-Path -Path $nasInstanceDir -ChildPath $backupType
+
+                if (-not (Test-Path -Path $nasTypeDir -PathType Container)) {
+                    New-Item -Path $nasTypeDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                }
+
+                $nasArchivePath = Join-Path -Path $nasTypeDir -ChildPath $archiveFileName
+
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Copying archive to NAS: $nasArchivePath" -Level INFO -Context $InstanceName
+                }
+
+                Copy-SEBThrottled `
+                    -Source           $ccArchivePath `
+                    -Destination      $nasArchivePath `
+                    -MaxBandwidthMbps $netBandwidthMbps `
+                    -RobocopyIpgMs    $netRobocopyIpgMs
+
+                if ($hasLogger) {
+                    Write-SEBLog -Message "NAS copy completed." -Level INFO -Context $InstanceName
+                }
+            }
+            catch {
+                $nasWarn = "Failed to copy archive to NAS: $_"
+                $warnings.Add($nasWarn)
+                if ($hasLogger) {
+                    Write-SEBLog -Message $nasWarn -Level WARN -Context $InstanceName
+                }
             }
         }
 
@@ -601,7 +658,7 @@ function Invoke-SEBBackup {
         $result.Duration = $overallDuration
 
         try {
-            Add-SEBMetric -Metric @{
+            Add-SEBMetric -InstanceName $InstanceName -BackupRoot $ccBackupRoot -MetricData @{
                 instance       = $InstanceName
                 node           = $NodeName
                 type           = $backupType
@@ -621,9 +678,14 @@ function Invoke-SEBBackup {
         # ========================================================================
         # STEP 15: Notification
         # ========================================================================
+        # Finalize the result BEFORE notifying. Success/Warnings were still at their initial
+        # values here, so a successful backup was being reported as a failure with no warnings.
+        $result.Success = $integrityPassed
+        $result.Warnings = $warnings.ToArray()
+
         if (-not $SkipNotify -and $globalConfig.notifications.enabled) {
             try {
-                Send-SEBBackupNotification -BackupResult $result -GlobalConfig $globalConfig
+                Send-SEBBackupNotification -InstanceName $InstanceName -BackupResult $result -GlobalConfig $globalConfig
             }
             catch {
                 $warnings.Add("Failed to send notification: $_")
@@ -700,7 +762,7 @@ function Invoke-SEBBackup {
         # Send failure notification
         if (-not $SkipNotify -and $globalConfig -and $globalConfig.notifications.enabled -and $globalConfig.notifications.on_failure) {
             try {
-                Send-SEBBackupNotification -BackupResult $result -GlobalConfig $globalConfig
+                Send-SEBBackupNotification -InstanceName $InstanceName -BackupResult $result -GlobalConfig $globalConfig
             }
             catch {
                 # Swallow notification errors during failure path
@@ -709,10 +771,17 @@ function Invoke-SEBBackup {
     }
     finally {
         # ========================================================================
-        # STEP 18: Release lock file (always)
+        # STEP 18: Release lock file and tear down the node session (always)
         # ========================================================================
         if ($lockAcquired) {
             Remove-SEBLockFile -InstanceName $InstanceName | Out-Null
+        }
+
+        # The session is created per backup; close it so sessions do not accumulate
+        # across scheduled runs. A re-entrant caller (-KeepSession) owns the session's
+        # lifecycle and keeps using it after we return, so do not tear it down here.
+        if ($null -ne $session -and -not $KeepSession) {
+            Remove-SEBSession -NodeName $NodeName | Out-Null
         }
     }
 
