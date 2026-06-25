@@ -86,10 +86,17 @@ function Get-SEBInstanceConfig {
         return $null
     }
 
-    # Convert deserialized PSObject back to hashtable if needed (remoting can deserialize differently)
+    # Convert deserialized PSObject back to hashtable if needed (remoting can deserialize
+    # differently). PSToml's ConvertFrom-Toml also returns an ordered dictionary rather than a
+    # [hashtable], and remoting can hand it back as a PSCustomObject or a dictionary depending on
+    # the transport -- Convert-PSObjectToHashtable normalizes all of those shapes to a hashtable so
+    # the downstream Merge-ConfigOverrides (which requires [hashtable]) binds cleanly.
     if ($instanceConfig -isnot [hashtable]) {
         $instanceConfig = Convert-PSObjectToHashtable -InputObject $instanceConfig
     }
+
+    # Normalize legacy instance-config layouts to the canonical schema the engine reads.
+    $instanceConfig = ConvertTo-CanonicalInstanceConfig -InputObject $instanceConfig
 
     # Get global config to use as defaults
     $globalConfig = Get-SEBGlobalConfig
@@ -154,6 +161,17 @@ function Convert-PSObjectToHashtable {
         }
         return $result
     }
+    elseif ($InputObject -is [System.Collections.IDictionary]) {
+        # Catches PSToml's [System.Collections.Specialized.OrderedDictionary] (returned by
+        # ConvertFrom-Toml) and any other dictionary shape, which are NOT [hashtable] and would
+        # otherwise fall through to the passthrough branch -- leaving Merge-ConfigOverrides to
+        # fail binding its [hashtable] parameter.
+        $result = @{}
+        foreach ($key in $InputObject.Keys) {
+            $result[$key] = Convert-PSObjectToHashtable -InputObject $InputObject[$key]
+        }
+        return $result
+    }
     elseif ($InputObject -is [System.Management.Automation.PSCustomObject]) {
         $result = @{}
         foreach ($prop in $InputObject.PSObject.Properties) {
@@ -171,4 +189,80 @@ function Convert-PSObjectToHashtable {
     else {
         return $InputObject
     }
+}
+
+function ConvertTo-CanonicalInstanceConfig {
+    <#
+    .SYNOPSIS
+        Normalizes a legacy instance-config layout to the canonical schema the engine reads.
+
+    .DESCRIPTION
+        Back-compat shim for nodes whose C:\SEBackup\instances\{name}.toml was written by an
+        older Register-Instance.ps1 / Setup-Node.ps1 that emitted the now-superseded layout:
+        operational values nested under [paths] / [smb] / [vss] / [instance], and the VRage key
+        named [vrage_api].key.
+
+        The current engine (Invoke-SEBBackup, Invoke-SEBRestore, Test-SEBPreFlight,
+        Start/Stop-SEBTorchServer) reads the operational values as FLAT top-level keys
+        (world_path, staging_path, share_name, run_mode) plus a nested [vrage_api] table with
+        port / security_key. New configs are generated in that shape directly, so this shim is
+        ONLY a bridge for already-deployed nodes that have not been re-registered.
+
+        It is intentionally additive and non-destructive: a legacy value is copied to its
+        canonical key ONLY when the canonical key is absent, so a config already written in the
+        canonical schema passes through untouched and an explicit canonical value always wins.
+
+    .PARAMETER InputObject
+        The parsed instance-config hashtable (already converted from the TOML / remoting shape).
+
+    .OUTPUTS
+        System.Collections.Hashtable
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$InputObject
+    )
+
+    $config = $InputObject
+
+    # Map legacy nested values onto canonical flat keys, only filling gaps.
+    # (legacy section, legacy key) -> canonical top-level key
+    $flatMap = @(
+        @{ Section = 'paths'; Key = 'world_save';    Target = 'world_path' }
+        @{ Section = 'paths'; Key = 'staging_local'; Target = 'staging_path' }
+        @{ Section = 'smb';   Key = 'share_name';    Target = 'share_name' }
+    )
+
+    foreach ($m in $flatMap) {
+        if (-not $config.ContainsKey($m.Target) -and
+            $config.ContainsKey($m.Section) -and
+            $config[$m.Section] -is [hashtable] -and
+            $config[$m.Section].ContainsKey($m.Key) -and
+            -not [string]::IsNullOrWhiteSpace([string]$config[$m.Section][$m.Key])) {
+            $config[$m.Target] = $config[$m.Section][$m.Key]
+        }
+    }
+
+    # run_mode used to live under [instance]; the engine now reads it top-level.
+    if (-not $config.ContainsKey('run_mode') -and
+        $config.ContainsKey('instance') -and
+        $config['instance'] -is [hashtable] -and
+        $config['instance'].ContainsKey('run_mode') -and
+        -not [string]::IsNullOrWhiteSpace([string]$config['instance']['run_mode'])) {
+        $config['run_mode'] = $config['instance']['run_mode']
+    }
+
+    # VRage key was renamed [vrage_api].key -> [vrage_api].security_key.
+    if ($config.ContainsKey('vrage_api') -and $config['vrage_api'] -is [hashtable]) {
+        $vrage = $config['vrage_api']
+        if (-not $vrage.ContainsKey('security_key') -and
+            $vrage.ContainsKey('key') -and
+            -not [string]::IsNullOrWhiteSpace([string]$vrage['key'])) {
+            $vrage['security_key'] = $vrage['key']
+        }
+    }
+
+    return $config
 }

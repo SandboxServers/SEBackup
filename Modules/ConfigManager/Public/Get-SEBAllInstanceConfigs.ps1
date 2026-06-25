@@ -146,6 +146,10 @@ function Get-SEBAllInstanceConfigs {
             $instanceConfig = Convert-PSObjectToHashtable -InputObject $instanceConfig
         }
 
+        # Normalize legacy instance-config layouts to the canonical schema the engine reads
+        # (same shim Get-SEBInstanceConfig applies, so batch discovery and single-load agree).
+        $instanceConfig = ConvertTo-CanonicalInstanceConfig -InputObject $instanceConfig
+
         # Merge with global defaults
         if ($globalDefaults.Count -gt 0) {
             $merged = Merge-ConfigOverrides -Default $globalDefaults -Override $instanceConfig

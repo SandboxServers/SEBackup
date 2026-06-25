@@ -90,6 +90,13 @@ function Test-SEBConfig {
                     Warnings = $warnings.ToArray()
                 }
             }
+            # Normalize the parsed config to a hashtable tree. ConvertFrom-Toml's nested tables are
+            # ordered dictionaries (and depending on the host/PSToml load context the top level may
+            # be a hashtable while its children are still OrderedDictionary), but the Test-*Config
+            # helpers gate nested sections with "-is [hashtable]". Deep-convert unconditionally
+            # (the converter is a no-op for values already hashtables) so a perfectly valid file no
+            # longer fails with "[instance] must be a table/section, got: OrderedDictionary".
+            $Config = Convert-PSObjectToHashtable -InputObject $Config
         }
         catch {
             $errors.Add("Failed to parse TOML file '$Path': $_")
@@ -318,7 +325,13 @@ function Test-InstanceConfig {
         [System.Collections.Generic.List[string]]$Warnings
     )
 
-    # --- [instance] section ---
+    # The instance schema validated here is the canonical one the SEBackup engine reads:
+    # the operational values are FLAT top-level keys (world_path, staging_path, share_name,
+    # run_mode) plus a nested [vrage_api] table (port / security_key), with [instance] holding
+    # identity metadata. Legacy layouts ([paths]/[smb]/[vss], [vrage_api].key) are accepted with
+    # a warning -- Get-SEBInstanceConfig normalizes them onto the canonical keys at load time.
+
+    # --- [instance] section (identity metadata) ---
     if (-not $Config.ContainsKey('instance')) {
         $Errors.Add("[instance] section is missing.")
     }
@@ -337,27 +350,54 @@ function Test-InstanceConfig {
         }
     }
 
-    # --- [torch] section ---
-    if (-not $Config.ContainsKey('torch')) {
-        $Errors.Add("[torch] section is missing.")
+    # --- world_path (top-level, required) ---
+    # Accept the legacy [paths].world_save location with a migration warning.
+    $worldPath = $null
+    if ($Config.ContainsKey('world_path')) {
+        $worldPath = $Config['world_path']
     }
-    else {
-        $torch = $Config.torch
-        if (-not ($torch -is [hashtable])) {
-            $Errors.Add("[torch] must be a table/section, got: $($torch.GetType().Name)")
-        }
-        else {
-            if ([string]::IsNullOrWhiteSpace($torch.install_path)) {
-                $Errors.Add("[torch].install_path is required and must not be empty.")
-            }
-            elseif ($torch.install_path -notmatch '^[A-Za-z]:\\') {
-                $Warnings.Add("[torch].install_path does not look like an absolute Windows path: $($torch.install_path)")
-            }
+    elseif ($Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and -not [string]::IsNullOrWhiteSpace($Config.paths.world_save)) {
+        $worldPath = $Config.paths.world_save
+        $Warnings.Add("World path found under legacy [paths].world_save. Re-register this instance (or move it to a top-level 'world_path') so it matches the current schema.")
+    }
 
-            if ([string]::IsNullOrWhiteSpace($torch.world_path)) {
-                $Warnings.Add("[torch].world_path is not set. It will be derived from the Torch install path.")
-            }
-        }
+    if ([string]::IsNullOrWhiteSpace($worldPath)) {
+        $Errors.Add("'world_path' is required (top-level key) and must not be empty. It is the world save folder the engine snapshots and restores.")
+    }
+    elseif ($worldPath -notmatch '^[A-Za-z]:\\') {
+        $Warnings.Add("'world_path' does not look like an absolute Windows path: $worldPath")
+    }
+
+    # --- share_name (top-level, required for archive transfer) ---
+    $shareName = $null
+    if ($Config.ContainsKey('share_name')) {
+        $shareName = $Config['share_name']
+    }
+    elseif ($Config.ContainsKey('smb') -and $Config.smb -is [hashtable] -and -not [string]::IsNullOrWhiteSpace($Config.smb.share_name)) {
+        $shareName = $Config.smb.share_name
+        $Warnings.Add("Share name found under legacy [smb].share_name. Re-register this instance (or move it to a top-level 'share_name') so it matches the current schema.")
+    }
+
+    if ([string]::IsNullOrWhiteSpace($shareName)) {
+        $Errors.Add("'share_name' is required (top-level key). The C&C pulls finished archives from this SMB share on the node.")
+    }
+
+    # --- staging_path (top-level, optional; defaults to C:\SEBackup\staging) ---
+    if (-not $Config.ContainsKey('staging_path') -and
+        -not ($Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and $Config.paths.ContainsKey('staging_local'))) {
+        $Warnings.Add("'staging_path' is not set. The engine will default to 'C:\\SEBackup\\staging'.")
+    }
+
+    # --- run_mode (top-level, optional; defaults to service) ---
+    $runMode = if ($Config.ContainsKey('run_mode')) {
+        $Config['run_mode']
+    }
+    elseif ($Config.ContainsKey('instance') -and $Config.instance -is [hashtable]) {
+        $Config.instance.run_mode
+    }
+    else { $null }
+    if (-not [string]::IsNullOrWhiteSpace($runMode) -and $runMode -notin @('service', 'console')) {
+        $Warnings.Add("'run_mode' should be 'service' or 'console'. Got: $runMode")
     }
 
     # --- [vrage_api] section ---
@@ -369,15 +409,18 @@ function Test-InstanceConfig {
                 $Errors.Add("[vrage_api].port must be between 1 and 65535. Got: $port")
             }
         }
-        if ($vrageApi.ContainsKey('key') -and [string]::IsNullOrWhiteSpace($vrageApi.key)) {
-            $Warnings.Add("[vrage_api].key is empty. VRage API authentication may fail.")
+        if ($vrageApi.ContainsKey('key') -and -not $vrageApi.ContainsKey('security_key')) {
+            $Warnings.Add("[vrage_api].key is the legacy key name. The engine reads [vrage_api].security_key -- rename it (or re-register the instance).")
+        }
+        if ($vrageApi.ContainsKey('security_key') -and [string]::IsNullOrWhiteSpace($vrageApi.security_key)) {
+            $Warnings.Add("[vrage_api].security_key is empty. The pre-backup world save and post-restore API ping will be skipped.")
         }
     }
     else {
-        $Warnings.Add("[vrage_api] section is not set. Global defaults will be used.")
+        $Warnings.Add("[vrage_api] section is not set. Global defaults will be used and no security key will be available.")
     }
 
-    # --- [backup] section ---
+    # --- [backup] section (optional metadata) ---
     if ($Config.ContainsKey('backup') -and $Config.backup -is [hashtable]) {
         $backup = $Config.backup
         if ($backup.ContainsKey('enabled') -and $backup.enabled -isnot [bool]) {

@@ -145,23 +145,32 @@ Save-SEBCredential -NodeName "gamingpc01"
 
 ## Instance Configuration (`C:\SEBackup\instances\{instancename}.toml`)
 
-Each Torch server instance on a compute node has its own config file on that node. The filename (without `.toml`) becomes the instance identifier.
+Each Torch server instance on a compute node has its own config file on that node. The filename (without `.toml`) becomes the instance identifier. `Register-Instance.ps1` normally generates this file for you; the fields below are what the backup and restore engine actually reads.
+
+> **TOML ordering matters.** The operational keys (`run_mode`, `world_path`, `staging_path`, `share_name`) are **top-level** keys and must appear **before** the first `[table]` header. In TOML, a bare key written after a `[section]` header belongs to that section, so moving these under `[instance]` makes the engine read them as missing.
+
+### Top-level operational keys
+
+These are read directly by the engine (`Invoke-SEBBackup`, `Invoke-SEBRestore`, `Test-SEBPreFlight`, `Start`/`Stop-SEBTorchServer`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `world_path` | string (path) | (required) | Absolute path to the world save data directory (the folder containing `Sandbox.sbc`). This is the data SEBackup snapshots, archives, and restores. |
+| `share_name` | string | (required) | Name of the SMB share on the node exposing the staging directory (typically `SEBackup_{instance}$`). The C&C pulls finished archives from it. |
+| `staging_path` | string (path) | `C:\SEBackup\staging` | Local staging area on the node where the world is copied from the VSS snapshot and compressed. |
+| `run_mode` | string | `"service"` | How the Torch server runs: `"service"` (Windows service) or `"console"`. Controls how the restore engine stops/starts the server. |
+| `service_name` | string | `TorchServer_{name}` | Optional. The Windows service name when `run_mode = "service"`. |
+| `process_name` | string | `Torch.Server` | Optional. Process image name to wait on when stopping a `console`-mode server. |
 
 ### [instance]
+
+Identity metadata.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | (none) | Internal name for this instance. Should match the filename stem. Must be unique within a node. Letters, numbers, underscores only. |
 | `display_name` | string | (none) | Human-readable display name for logs, notifications, and the GUI. |
 | `description` | string | `""` | Optional description for documentation purposes. |
-
-### [torch]
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `install_path` | string (path) | (none) | Absolute path to the Torch server installation directory on the compute node. Where `Torch.Server.exe` lives. |
-| `world_path` | string (path) | (auto-detected) | Path to the world save data directory. If not set, SEBackup looks at `{install_path}\Instance\Saves\{world_name}`. Override if your world is in a non-standard location. |
-| `config_path` | string (path) | `"{install_path}\\Torch.cfg"` | Optional path to the Torch configuration file. Usually auto-detected. |
 
 ### [vrage_api]
 
@@ -170,27 +179,19 @@ Overrides the global `[defaults.vrage_api]` settings for this instance.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `port` | integer | Global default (`8080`) | TCP port for the VRage Remote API on this instance. Each instance on the same node must use a unique port. |
-| `key` | string | `""` | VRage API authentication key. Found in `SpaceEngineers-Dedicated.cfg` under `<RemoteApiKey>`. Used to authenticate save commands. |
+| `security_key` | string | `""` | VRage Remote API security key (the Base64 "Remote API" key from `SpaceEngineers-Dedicated.cfg`). Used to authenticate save/ping requests. Empty means the pre-backup save and post-restore ping are skipped. |
 | `save_timeout_seconds` | integer | Global default (`120`) | Override the save timeout for this instance. Increase for very large worlds. |
 
-### [backup]
+> **Migration note.** Older configs nested these values differently (`[paths].world_save`, `[smb].share_name`, `[vss].volume`, `run_mode` under `[instance]`, and `[vrage_api].key`). `Get-SEBInstanceConfig` still reads those legacy layouts by normalizing them onto the keys above, but re-running `Register-Instance.ps1` rewrites the file in the current schema.
 
-Instance-specific backup behavior overrides.
+### [torch] (optional, informational)
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable or disable backups for this instance. Set to `false` to temporarily exclude without removing the config. |
-| `priority` | string | `"normal"` | Backup priority when multiple instances are queued. `"high"` = backed up first, `"normal"` = default, `"low"` = backed up last. |
-| `extra_paths` | array of strings | `[]` | Additional paths to include in the backup beyond the world save. Relative to `torch.install_path` unless absolute. Example: `["Instance\\Plugins", "Instance\\Torch.cfg"]` |
-| `exclude_patterns` | array of strings | `[]` | Glob patterns for files to exclude from the backup. Example: `["*.log", "Logs\\*", "*.tmp"]` |
-
-### [vss] (optional)
-
-Override VSS settings for this instance. Usually not needed.
+Recorded by `Register-Instance.ps1` for reference. The engine operates on the top-level `world_path`, not on these.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mount_base` | string (path) | Global default | Override the VSS mount directory. Only needed if instance data is on a different volume. |
+| `install_path` | string (path) | (none) | Absolute path to the Torch server installation directory (where `Torch.Server.exe` lives). |
+| `data_root` | string (path) | (none) | The Torch instance data root discovered during registration. |
 
 ---
 

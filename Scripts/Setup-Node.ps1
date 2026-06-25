@@ -407,28 +407,30 @@ try {
         $exampleTomlContent = @'
 # SEBackup Instance Configuration
 # Copy this file and rename it to match your instance name (e.g., MyServer.toml).
+#
+# Operational keys (run_mode, world_path, staging_path, share_name) are TOP-LEVEL
+# and must stay above the first [table] header -- a bare key written after a
+# "[section]" header belongs to that section in TOML, so moving them under
+# [instance] makes the backup/restore engine read them as missing.
+
+# --- Operational keys read by the backup/restore engine ---
+run_mode     = "service"
+world_path   = "C:\\ProgramData\\SpaceEngineersDedicated\\MyServer\\Saves\\MyWorld"
+staging_path = "D:\\SEBackup\\staging\\MyServer"
+share_name   = "SEBackup_MyServer$"
 
 [instance]
-name          = "MyServer"
-display_name  = "My Space Engineers Server"
-run_mode      = "service"
-
-[paths]
-torch_install   = "C:\\TorchServer"
-world_save      = "C:\\ProgramData\\SpaceEngineersDedicated\\MyServer\\Saves\\MyWorld"
-staging_local   = "D:\\SEBackup\\staging\\MyServer"
-data_root       = "C:\\ProgramData\\SpaceEngineersDedicated\\MyServer"
-
-[smb]
-share_name     = "SEBackup_MyServer$"
-share_path     = "D:\\SEBackup\\staging\\MyServer"
+name         = "MyServer"
+display_name = "My Space Engineers Server"
 
 [vrage_api]
-port           = 8080
-security_key   = ""
+port         = 8080
+security_key = ""
 
-[vss]
-volume         = "C:\\"
+# Informational only (not required by the engine):
+# [torch]
+# install_path = "C:\\TorchServer"
+# data_root    = "C:\\ProgramData\\SpaceEngineersDedicated\\MyServer"
 '@
         try {
             if (-not (Test-Path -Path $exampleTomlPath)) {
