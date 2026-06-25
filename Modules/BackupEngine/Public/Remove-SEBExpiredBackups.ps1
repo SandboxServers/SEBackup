@@ -98,22 +98,34 @@ function Remove-SEBExpiredBackups {
 
     if (Test-Path -Path $ccFullDir -PathType Container) {
         try {
-            # Get all full backup archives sorted by name (timestamp) descending
-            $fullArchives = Get-ChildItem -Path $ccFullDir -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '_FULL_' } |
+            # Only fulls with a PARSEABLE timestamp participate in retention. The outer filter
+            # requires just the literal '_FULL_' substring, so a malformed name (e.g.
+            # '..._FULL_corrupt.7z') has no timestamp. If it sorted into the KEEP window it would
+            # consume a keep slot and push a valid full into the expired set -- pruning a good
+            # chain. So partition FIRST: log+skip the unparseable ones up front and apply the keep
+            # count only to parseable fulls.
+            $allFulls = @(Get-ChildItem -Path $ccFullDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '_FULL_' })
+            foreach ($badFull in ($allFulls | Where-Object { $_.Name -notmatch '_FULL_(\d{8}_\d{6})' })) {
+                $errors.Add("Skipped unparseable C&C full archive (no timestamp): '$($badFull.Name)'")
+                if ($hasLogger) {
+                    Write-SEBLog -Message "Skipped unparseable C&C full archive (no timestamp), cannot identify its chain: $($badFull.Name)" -Level WARN -Context $InstanceName
+                }
+            }
+            $fullArchives = $allFulls |
+                Where-Object { $_.Name -match '_FULL_(\d{8}_\d{6})' } |
                 Sort-Object -Property Name -Descending
 
             if ($fullArchives -and $fullArchives.Count -gt $ccFullCount) {
-                # Archives to remove: everything beyond the keep count
+                # Archives to remove: everything beyond the keep count (all parseable here).
                 $expiredFulls = $fullArchives | Select-Object -Skip $ccFullCount
 
                 foreach ($expiredFull in $expiredFulls) {
                     try {
-                        # Extract the timestamp portion to find matching incrementals
-                        # Archive name format: {InstanceName}_FULL_{yyyyMMdd_HHmmss}.{ext}
-                        if ($expiredFull.Name -match '_FULL_(\d{8}_\d{6})') {
-                            $fullTimestamp = $Matches[1]
-                        }
+                        # Name is guaranteed to carry a valid timestamp (unparseable fulls were
+                        # filtered out above), so $fullTimestamp is always set this iteration.
+                        $null = $expiredFull.Name -match '_FULL_(\d{8}_\d{6})'
+                        $fullTimestamp = $Matches[1]
 
                         # Find the chain_id from the corresponding manifest
                         $fullManifestName = "${InstanceName}_FULL_${fullTimestamp}.json"
