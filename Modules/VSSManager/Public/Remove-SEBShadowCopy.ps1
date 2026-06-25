@@ -49,7 +49,8 @@ function Remove-SEBShadowCopy {
     Write-Verbose "VSSManager: Removing shadow copy $ShadowID on $($Session.ComputerName)"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($TargetShadowID)
 
             try {

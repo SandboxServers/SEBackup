@@ -55,8 +55,9 @@ function Get-SEBNodeMetrics {
     }
 
     try {
-        # Gather all metrics in a single remote invocation for efficiency
-        $remoteMetrics = Invoke-Command -Session $Session -ScriptBlock {
+        # Gather all metrics in a single remote invocation for efficiency.
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $remoteMetrics = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             $metrics = @{}
 
             # --- CPU ---

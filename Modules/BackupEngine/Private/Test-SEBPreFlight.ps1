@@ -82,7 +82,7 @@ function Test-SEBPreFlight {
             'C:\SEBackup\staging'
         }
 
-        $diskSpaceNode = Invoke-Command -Session $Session -ScriptBlock {
+        $diskSpaceNode = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($stagingPath)
             $driveLetter = (Split-Path -Path $stagingPath -Qualifier).TrimEnd(':')
             $drive = Get-PSDrive -Name $driveLetter -ErrorAction Stop
@@ -170,13 +170,15 @@ function Test-SEBPreFlight {
             $failures.Add("Instance config does not specify a 'world_path'.")
         }
         else {
-            $worldCheck = Invoke-Command -Session $Session -ScriptBlock {
+            $worldCheck = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
                 param($wPath)
-                $result = @{
+                # Node-local result name (not '$result') so the remote-scope contract test can
+                # confirm this block references no C&C-scoped variable.
+                $worldInfo = @{
                     FolderExists  = Test-Path -Path $wPath -PathType Container
                     SandboxExists = Test-Path -Path (Join-Path -Path $wPath -ChildPath 'Sandbox.sbc') -PathType Leaf
                 }
-                $result
+                $worldInfo
             } -ArgumentList $worldPath -ErrorAction Stop
 
             if (-not $worldCheck.FolderExists) {

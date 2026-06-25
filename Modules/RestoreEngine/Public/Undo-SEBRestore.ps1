@@ -109,8 +109,9 @@ function Undo-SEBRestore {
             throw "Instance config does not specify 'world_path'."
         }
 
-        # Find the most recent prerestore directory
-        $findResult = Invoke-Command -Session $session -ScriptBlock {
+        # Find the most recent prerestore directory.
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $findResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($worldDir)
 
             $worldName = Split-Path -Path $worldDir -Leaf
@@ -156,8 +157,9 @@ function Undo-SEBRestore {
             throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
         }
 
-        # Perform the undo: move current aside, rename prerestore back
-        $undoResult = Invoke-Command -Session $session -ScriptBlock {
+        # Perform the undo: move current aside, rename prerestore back.
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $undoResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($worldDir, $preRestorePath)
 
             $worldName = Split-Path -Path $worldDir -Leaf

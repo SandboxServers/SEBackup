@@ -388,7 +388,8 @@ try {
         # world path and the remote Test-Path checks always reported "could not verify".
         $worldPath = $instanceConfig['world_path']
 
-        $verifyResult = Invoke-Command -Session $session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $verifyResult = Invoke-SEBRemoteCommand -Session $session -ScriptBlock {
             param($WorldPath)
 
             $sandboxFile = Join-Path $WorldPath 'Sandbox.sbc'

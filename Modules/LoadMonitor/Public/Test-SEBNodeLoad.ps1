@@ -109,7 +109,7 @@ function Test-SEBNodeLoad {
 
     # --- 2. CPU usage via CIM on the remote node ---
     try {
-        $cpuPercent = Invoke-Command -Session $Session -ScriptBlock {
+        $cpuPercent = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             $cpuSamples = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
                 Select-Object -ExpandProperty LoadPercentage
             if ($cpuSamples -is [array]) {
@@ -134,7 +134,7 @@ function Test-SEBNodeLoad {
 
     # --- 3. Available memory via CIM on the remote node ---
     try {
-        $memoryInfo = Invoke-Command -Session $Session -ScriptBlock {
+        $memoryInfo = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
             [PSCustomObject]@{
                 TotalVisibleMemoryKB   = $os.TotalVisibleMemorySize

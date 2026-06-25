@@ -326,14 +326,14 @@ function Invoke-SEBBackup {
 
         # Resolve the volume root and the world path relative to it on the node, up front,
         # so the remote VSS block stays self-contained (no nested remoting, no C&C state).
-        $pathInfo = Invoke-Command -Session $session -ScriptBlock {
+        $pathInfo = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($wPath)
             $qualifier = Split-Path -Path $wPath -Qualifier
             @{
                 VolumeRoot    = "$qualifier\"
                 WorldRelative = $wPath.Substring($qualifier.Length).TrimStart('\', '/')
             }
-        } -ArgumentList $worldPath -ErrorAction Stop
+        } -ArgumentList $worldPath
         $volumeRoot = $pathInfo.VolumeRoot
         $worldRelative = $pathInfo.WorldRelative
 
@@ -412,7 +412,7 @@ function Invoke-SEBBackup {
             }
 
             # Prune unchanged files from staging on the node.
-            Invoke-Command -Session $session -ScriptBlock {
+            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
                 param($StagingDir, $KeepRelative)
                 $keep = [System.Collections.Generic.HashSet[string]]::new(
                     [string[]]@($KeepRelative | ForEach-Object { $_.Replace('/', '\') }),
@@ -424,7 +424,7 @@ function Invoke-SEBBackup {
                         Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
                     }
                 }
-            } -ArgumentList @($nodeStagingDir, $changedFiles) -ErrorAction Stop
+            } -ArgumentList @($nodeStagingDir, $changedFiles)
         }
 
         # ========================================================================
@@ -444,7 +444,7 @@ function Invoke-SEBBackup {
             -CompressionLevel $compressionLevel
 
         # Get archive size from node
-        $archiveInfo = Invoke-Command -Session $session -ScriptBlock {
+        $archiveInfo = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($archPath)
             if (Test-Path -Path $archPath -PathType Leaf) {
                 $fi = Get-Item -Path $archPath
@@ -453,7 +453,7 @@ function Invoke-SEBBackup {
             else {
                 @{ SizeBytes = 0; Exists = $false }
             }
-        } -ArgumentList $nodeArchivePath -ErrorAction Stop
+        } -ArgumentList $nodeArchivePath
 
         if (-not $archiveInfo.Exists) {
             throw "Archive was not created on node: $nodeArchivePath"
@@ -712,7 +712,9 @@ function Invoke-SEBBackup {
         # STEP 17: Cleanup staging on node
         # ========================================================================
         try {
-            Invoke-Command -Session $session -ScriptBlock {
+            # Route node-staging cleanup through the wrapper for retry/logging/reconnect. A hard
+            # failure throws and is caught below as a non-fatal warning (same outcome as before).
+            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
                 param($stagingDir, $archivePath)
 
                 # Remove the staging directory
@@ -737,7 +739,7 @@ function Invoke-SEBBackup {
                     }
                     Remove-Item -Path $archive.FullName -Force -ErrorAction SilentlyContinue
                 }
-            } -ArgumentList $nodeStagingDir, $nodeArchivePath -ErrorAction SilentlyContinue
+            } -ArgumentList $nodeStagingDir, $nodeArchivePath -ErrorAction Stop
         }
         catch {
             $warnings.Add("Node staging cleanup failed: $_")

@@ -63,15 +63,20 @@ function New-SEBSession {
         [hashtable]$NodeConfig
     )
 
-    # Check for a cached session that is still open
+    # Check for a cached session that is still usable. Availability (not just State)
+    # is the authoritative liveness signal -- a session can be State=Opened yet
+    # Availability=Busy/None and unable to accept a new command. Mirror this exact
+    # condition in Test-SEBSessionExists and Invoke-SEBRemoteCommand.
     if ($script:SEBSessions.ContainsKey($NodeName)) {
         $existingSession = $script:SEBSessions[$NodeName]
-        if ($existingSession.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+        $isOpen = $existingSession.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened
+        $isAvailable = $existingSession.Availability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::Available
+        if ($isOpen -and $isAvailable) {
             Write-Verbose "Returning cached session for node '$NodeName' (ID: $($existingSession.Id))"
             return $existingSession
         }
         else {
-            Write-Verbose "Cached session for node '$NodeName' is in state '$($existingSession.State)'. Removing and creating a new session."
+            Write-Verbose "Cached session for node '$NodeName' is not usable (State=$($existingSession.State), Availability=$($existingSession.Availability)). Removing and creating a new session."
             try { Remove-PSSession -Session $existingSession -ErrorAction SilentlyContinue } catch {}
             $script:SEBSessions.Remove($NodeName)
         }

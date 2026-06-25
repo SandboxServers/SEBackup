@@ -60,7 +60,8 @@ function Mount-SEBShadowCopy {
     Write-Verbose "VSSManager: Mounting shadow copy to $MountPoint on $($Session.ComputerName)"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($Device, $Mount)
 
             try {

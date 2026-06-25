@@ -14,10 +14,11 @@ function Test-SEBSessionExists {
         tear it down (it belongs to whoever created it). If no session exists,
         New-SEBSession creates one and the caller owns it.
 
-        The "open" determination mirrors New-SEBSession exactly: a cached session
-        is only considered to exist here if it is present AND in the Opened state.
-        A cached-but-broken/closed session returns $false, because New-SEBSession
-        would discard and recreate it (making the caller the owner of the new one).
+        The "usable" determination mirrors New-SEBSession exactly: a cached session
+        is only considered to exist here if it is present AND in the Opened state
+        AND Availability=Available. A cached-but-broken/closed/busy session returns
+        $false, because New-SEBSession would discard and recreate it (making the
+        caller the owner of the new one).
 
     .PARAMETER NodeName
         The name of the node to check for a cached session. This is the same key
@@ -47,5 +48,7 @@ function Test-SEBSessionExists {
     }
 
     $existingSession = $script:SEBSessions[$NodeName]
-    return ($existingSession.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened)
+    $isOpen = $existingSession.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened
+    $isAvailable = $existingSession.Availability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::Available
+    return ($isOpen -and $isAvailable)
 }

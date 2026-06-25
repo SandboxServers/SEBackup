@@ -7,11 +7,25 @@ function Invoke-SEBRemoteCommand {
         A resilient wrapper around Invoke-Command that provides:
 
         - Automatic retry on transient failures (configurable retry count).
-        - Session health detection: if the session is in a Broken or Closed
-          state, attempts to reconnect by creating a new session via
+        - Session health detection: if the session is no longer available to
+          run commands, attempts to reconnect by creating a new session via
           New-SEBSession (one reconnection attempt per invocation).
+        - Reconnect propagation: when a reconnection happens, the refreshed
+          session is pushed back to the caller so subsequent calls do not keep
+          using the dead handle. Propagation works two ways:
+            1. New-SEBSession rewrites the module-scoped session cache keyed by
+               NodeName, so the next New-SEBSession/Test-SEBSessionExists for
+               that node observes the live session.
+            2. If the caller passes its session variable by reference via
+               -SessionRef, that variable is updated in place to the live
+               session immediately.
         - Structured logging of command execution via Write-SEBLog when the
           Logger module is available.
+
+        Session liveness is determined by Availability (RunspaceAvailability),
+        not just State: a PSSession can be State=Opened yet Availability=Busy or
+        None, in which case it cannot accept a new command. Only an Available
+        session is used as-is; anything else triggers the reconnect path.
 
         This function is intended to be the primary mechanism for executing
         commands on remote Space Engineers Torch server nodes during backup
@@ -32,6 +46,12 @@ function Invoke-SEBRemoteCommand {
         meaning the command will be attempted a total of 2 times (initial
         attempt + 1 retry).
 
+    .PARAMETER SessionRef
+        An optional [ref] to the caller's own session variable. When the wrapper
+        reconnects a dead session, it writes the new session back through this
+        reference so the caller's variable points at the live session for its
+        subsequent operations. Pass it as -SessionRef ([ref]$session).
+
     .EXAMPLE
         $session = New-SEBSession -NodeName "GameServer01"
         Invoke-SEBRemoteCommand -Session $session -ScriptBlock { Get-Process torch* }
@@ -49,8 +69,9 @@ function Invoke-SEBRemoteCommand {
         $session = New-SEBSession -NodeName "GameServer01"
         Invoke-SEBRemoteCommand -Session $session -ScriptBlock {
             Stop-Service -Name "TorchServer" -Force
-        } -RetryCount 0
-        # No retry -- fail immediately on error.
+        } -SessionRef ([ref]$session) -RetryCount 0
+        # If the session is dead it is reconnected and $session is refreshed in
+        # place, so the caller's next -Session $session call uses the live one.
 
     .OUTPUTS
         System.Object
@@ -69,7 +90,10 @@ function Invoke-SEBRemoteCommand {
 
         [Parameter()]
         [ValidateRange(0, 10)]
-        [int]$RetryCount = 1
+        [int]$RetryCount = 1,
+
+        [Parameter()]
+        [ref]$SessionRef
     )
 
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
@@ -82,13 +106,15 @@ function Invoke-SEBRemoteCommand {
     while ($attempt -lt $maxAttempts) {
         $attempt++
 
-        # Check session health before executing
-        if ($Session.State -ne [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+        # Check session health before executing. Availability (not State) is the
+        # authoritative signal: a session can be State=Opened but Availability=Busy
+        # or None, in which case it cannot accept a new command.
+        if ($Session.Availability -ne [System.Management.Automation.Runspaces.RunspaceAvailability]::Available) {
             if (-not $reconnected) {
                 if ($hasLogger) {
-                    Write-SEBLog -Message "Session to '$nodeName' is in state '$($Session.State)'. Attempting reconnection." -Level WARN
+                    Write-SEBLog -Message "Session to '$nodeName' is not available (State=$($Session.State), Availability=$($Session.Availability)). Attempting reconnection." -Level WARN
                 }
-                Write-Warning "Session to '$nodeName' is in state '$($Session.State)'. Attempting to reconnect..."
+                Write-Warning "Session to '$nodeName' is not available (State=$($Session.State), Availability=$($Session.Availability)). Attempting to reconnect..."
 
                 try {
                     # Extract the node name from the session name (format: SEBackup-{NodeName})
@@ -97,10 +123,22 @@ function Invoke-SEBRemoteCommand {
                         $sessionNodeName = $nodeName
                     }
 
-                    # Remove the broken session from cache and create a new one
+                    # Remove the broken session from the cache and create a new one.
+                    # New-SEBSession rewrites the module-scoped cache for this node,
+                    # so cache-based callers (New-SEBSession/Test-SEBSessionExists)
+                    # observe the live session after this point.
                     Remove-SEBSession -NodeName $sessionNodeName -ErrorAction SilentlyContinue
                     $Session = New-SEBSession -NodeName $sessionNodeName
                     $reconnected = $true
+
+                    # Propagate the refreshed session back to the caller's variable so its
+                    # later -Session $session calls use the live handle, not the dead one.
+                    if ($PSBoundParameters.ContainsKey('SessionRef') -and $null -ne $SessionRef) {
+                        $SessionRef.Value = $Session
+                    }
+
+                    # Keep $nodeName in sync with the reconnected session for logging.
+                    $nodeName = $Session.ComputerName
 
                     if ($hasLogger) {
                         Write-SEBLog -Message "Successfully reconnected session to '$nodeName'." -Level INFO
@@ -112,7 +150,7 @@ function Invoke-SEBRemoteCommand {
                 }
             }
             else {
-                throw "Session to '$nodeName' is in state '$($Session.State)' after reconnection attempt. Cannot execute command."
+                throw "Session to '$nodeName' is not available (State=$($Session.State), Availability=$($Session.Availability)) after reconnection attempt. Cannot execute command."
             }
         }
 

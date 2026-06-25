@@ -182,6 +182,11 @@ catch {
 # Step 3: Create PSSession to node
 # ══════════════════════════════════════════════════════════════════════════════
 Write-Host '[3/11] Establishing PSSession...' -ForegroundColor Yellow
+# NOTE: every Invoke-Command in this bootstrap script is intentionally left RAW (not routed through
+# Invoke-SEBRemoteCommand). This session is built by hand from a just-created credential that is NOT
+# yet stored via Save-SEBCredential and is NOT in the RemoteManager session cache. The wrapper's
+# reconnect path calls New-SEBSession/Get-SEBCredential (cache + stored creds), neither of which
+# exists during node bootstrap -- so the wrapper could not reconnect this session anyway.
 $session = $null
 try {
     $sessionOption = New-PSSessionOption -OperationTimeout 60000 -OpenTimeout 30000

@@ -61,7 +61,8 @@ function Deploy-SEBRestoredFiles {
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
 
     try {
-        $deployResult = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $deployResult = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($src, $worldDir)
 
             $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'

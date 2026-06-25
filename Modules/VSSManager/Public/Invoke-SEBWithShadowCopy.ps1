@@ -113,6 +113,10 @@ function Invoke-SEBWithShadowCopy {
             $fullArgumentList += $ArgumentList
         }
 
+        # Raw Invoke-Command (not Invoke-SEBRemoteCommand): this function is itself the node-remoting
+        # wrapper for VSS-scoped work (it is one of the contract test's $remoteWrappers). Nesting it
+        # inside Invoke-SEBRemoteCommand would double the retry/backoff and could re-run the caller's
+        # block mid-shadow-copy on a retry. The session is created and owned by the caller.
         $result = Invoke-Command -Session $Session -ScriptBlock $ScriptBlock -ArgumentList $fullArgumentList
 
         return $result

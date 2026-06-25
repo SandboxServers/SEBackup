@@ -70,7 +70,8 @@ function Stop-SEBTorchServer {
         }
 
         try {
-            $stopResult = Invoke-Command -Session $Session -ScriptBlock {
+            # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+            $stopResult = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
                 param($svcName, $timeout)
 
                 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -178,6 +179,10 @@ function Stop-SEBTorchServer {
                         $procDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
                         $processExited = $false
                         while ((Get-Date) -lt $procDeadline) {
+                            # Raw Invoke-Command (not the wrapper): this is a tight -EA SilentlyContinue
+                            # poll loop that must SWALLOW transient errors and keep polling. The wrapper
+                            # would instead add its own retry/backoff and THROW on exhaustion, breaking
+                            # the loop's swallow-and-continue contract.
                             $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
                                 param($name)
                                 [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)

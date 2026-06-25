@@ -49,7 +49,8 @@ function Get-SEBAllInstanceConfigs {
     Write-Verbose "Discovering instance configs on remote node: $($Session.ComputerName):$instancesDir"
 
     try {
-        $remoteResults = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $remoteResults = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($dir)
 
             if (-not (Test-Path -Path $dir -PathType Container)) {

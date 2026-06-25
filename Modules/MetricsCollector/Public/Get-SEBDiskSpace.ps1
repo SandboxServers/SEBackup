@@ -96,7 +96,8 @@ function Get-SEBDiskSpace {
     # 1. Node Staging (via remote session if provided)
     if ($Session) {
         try {
-            $nodeSpace = Invoke-Command -Session $Session -ScriptBlock {
+            # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+            $nodeSpace = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
                 try {
                     # Use the system drive as a proxy for node staging space
                     $sysDrive = [System.IO.DriveInfo]::new($env:SystemDrive)

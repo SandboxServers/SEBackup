@@ -160,7 +160,7 @@ Describe 'Instance TOML canonical schema (Issue #14)' {
             # Real PSRemoting hands a parsed TOML config back as a deserialized object tree
             # (PSCustomObject for tables). Return that shape so Convert-PSObjectToHashtable's
             # PSCustomObject branch runs, exactly as in production.
-            Mock Invoke-Command -ModuleName ConfigManager {
+            Mock Invoke-SEBRemoteCommand -ModuleName ConfigManager {
                 [PSCustomObject]@{
                     run_mode     = 'service'
                     world_path   = 'C:\TorchServers\PvPArena\Instance\Saves\PvPWorld'
@@ -422,7 +422,7 @@ Describe 'Instance TOML canonical schema (Issue #14)' {
             # guard would short-circuit) whose [vrage_api] / [instance] children are genuine
             # OrderedDictionary instances produced by ConvertFrom-Toml. The legacy 'key' lives in
             # that OrderedDictionary child, exactly where the shallow guard would strand it.
-            Mock Invoke-Command -ModuleName ConfigManager {
+            Mock Invoke-SEBRemoteCommand -ModuleName ConfigManager {
                 $legacyToml = @'
 [instance]
 name = "Legacy"
@@ -552,7 +552,7 @@ key = "legacykey"
             # The shape an OLD node still has on disk: operational values under [paths]/[smb]/[vss],
             # run_mode under [instance], and the VRage key named 'key'. Returned as PSCustomObject to
             # mimic remoting.
-            Mock Invoke-Command -ModuleName ConfigManager {
+            Mock Invoke-SEBRemoteCommand -ModuleName ConfigManager {
                 [PSCustomObject]@{
                     instance  = [PSCustomObject]@{ name = 'Legacy'; display_name = 'Legacy'; run_mode = 'console' }
                     paths     = [PSCustomObject]@{

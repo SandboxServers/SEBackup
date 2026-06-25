@@ -12,7 +12,7 @@
 #    Pester 5 scopes a mock's *call history* to the block that produced it, so invoking in
 #    BeforeAll and asserting in a sibling It records zero calls. Calling per-It keeps the
 #    invocation and the Should -Invoke in the same history scope.
-#  * The downstream helpers (Get-SEBInstanceConfig, Stop/Start-SEBTorchServer, Invoke-Command)
+#  * The downstream helpers (Get-SEBInstanceConfig, Stop/Start-SEBTorchServer, Invoke-SEBRemoteCommand)
 #    strongly type -Session as [System.Management.Automation.Runspaces.PSSession]; PowerShell
 #    enforces that cast during parameter binding even for mocked commands, and the type has no
 #    public constructor, so the New-SEBSession mock returns an *uninitialized* PSSession instance
@@ -47,12 +47,12 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             Mock Stop-SEBTorchServer -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
             Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
 
-            # Two Invoke-Command calls: the prerestore-find, then the rename undo. Distinguish
+            # Two Invoke-SEBRemoteCommand calls: the prerestore-find, then the rename undo. Distinguish
             # them by the script block text via ParameterFilter.
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
                 @{ Found = $true; Path = 'C:\Torch\Instance\Saves\MyWorld_prerestore_20260101_010101'; Name = 'MyWorld_prerestore_20260101_010101'; Error = $null }
             }
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
                 @{ Success = $true; PostRestorePath = 'C:\Torch\Instance\Saves\MyWorld_postrestore_20260101_010102'; Error = $null }
             }
         }
@@ -89,11 +89,11 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             Mock Stop-SEBTorchServer -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
             Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
 
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
                 @{ Found = $true; Path = 'C:\Torch\Instance\Saves\MyWorld_prerestore_20260101_010101'; Name = 'MyWorld_prerestore_20260101_010101'; Error = $null }
             }
             # The rename undo returns a failure result, which the function turns into a throw.
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
                 @{ Success = $false; PostRestorePath = $null; Error = 'Failed to rename prerestore directory back: simulated' }
             }
         }
@@ -129,7 +129,7 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             Mock Get-SEBInstanceConfig -ModuleName RestoreEngine { @{ world_path = 'C:\Torch\Instance\Saves\MyWorld' } }
             Mock Stop-SEBTorchServer -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
             Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
-            Mock Invoke-Command -ModuleName RestoreEngine { @{} }
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine { @{} }
         }
 
         It 'aborts before touching the world and never creates a session or releases a lock it never held' {
@@ -140,7 +140,7 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
 
             # Never created a session, never ran a remote command against the world.
             Should -Invoke New-SEBSession  -ModuleName RestoreEngine -Times 0 -Exactly
-            Should -Invoke Invoke-Command  -ModuleName RestoreEngine -Times 0 -Exactly
+            Should -Invoke Invoke-SEBRemoteCommand  -ModuleName RestoreEngine -Times 0 -Exactly
             # Did not try to release a lock it never held, nor tear down a session it never made.
             Should -Invoke Remove-SEBLockFile -ModuleName RestoreEngine -Times 0 -Exactly
             Should -Invoke Remove-SEBSession  -ModuleName RestoreEngine -Times 0 -Exactly
@@ -170,10 +170,10 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             Mock Stop-SEBTorchServer -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
             Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
 
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
                 @{ Found = $true; Path = 'C:\Torch\Instance\Saves\MyWorld_prerestore_20260101_010101'; Name = 'MyWorld_prerestore_20260101_010101'; Error = $null }
             }
-            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
+            Mock Invoke-SEBRemoteCommand -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
                 @{ Success = $true; PostRestorePath = 'C:\Torch\Instance\Saves\MyWorld_postrestore_20260101_010102'; Error = $null }
             }
         }

@@ -66,7 +66,8 @@ function Get-SEBInstanceConfig {
     Write-Verbose "Reading instance config from remote node: $($Session.ComputerName):$remotePath"
 
     try {
-        $instanceConfig = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $instanceConfig = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($tomlPath)
 
             if (-not (Test-Path -Path $tomlPath -PathType Leaf)) {

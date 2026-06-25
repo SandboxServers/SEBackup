@@ -74,7 +74,8 @@ function Start-SEBTorchServer {
         }
 
         try {
-            $startResult = Invoke-Command -Session $Session -ScriptBlock {
+            # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+            $startResult = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
                 param($svcName, $timeout)
 
                 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue

@@ -160,6 +160,10 @@ catch {
 }
 
 Write-Host '[1/10] Creating PSSession...' -ForegroundColor Yellow
+# NOTE: the Invoke-Command calls in this interactive instance-registration script are intentionally
+# left RAW for now (follow-up). This is one-shot setup (write node config, create SMB share, probe
+# Torch paths), not the backup/restore data path issue #22 targets, and several calls rely on
+# -EA SilentlyContinue swallow semantics that the throwing wrapper would change. Tracked as follow-up.
 try {
     $session = New-SEBSession -NodeName $NodeName -NodeConfig $nodeConfig.node
     $checks['PSSession'] = $true
