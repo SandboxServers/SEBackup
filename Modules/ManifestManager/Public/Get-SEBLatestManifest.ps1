@@ -68,6 +68,15 @@ function Get-SEBLatestManifest {
         [string]$ChainId
     )
 
+    # $InstanceName becomes a directory segment ({BackupRoot}\{InstanceName}\manifests). Guard it
+    # through the shared Test-SEBSafeName validator (issue #28) so a crafted name cannot redirect the
+    # manifest scan outside the backup root; $null on rejection matches this function's "no manifest
+    # found" contract.
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
+        Write-Error "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+        return $null
+    }
+
     $manifestDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName | Join-Path -ChildPath 'manifests'
 
     if (-not (Test-Path -Path $manifestDir -PathType Container)) {

@@ -59,14 +59,15 @@ function Resolve-SEBChainArchivePath {
         return $null
     }
 
-    # archive_path must be a bare filename. Reject separators, traversal, rooted paths, and also
-    # wildcards / invalid filename chars: a value like '*.7z' passes the leaf/separator checks but
-    # Test-Path -Path would treat it as a pattern and could match an unintended archive.
-    $leaf = Split-Path -Path $name -Leaf
-    $hasWildcard = $name -match '[\*\?\[\]]'
-    $hasInvalidFileNameChar = ($name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0)
-    if ($name -ne $leaf -or $name -match '[\\/]' -or $name.Contains('..') -or
-        [System.IO.Path]::IsPathRooted($name) -or $hasWildcard -or $hasInvalidFileNameChar) {
+    # archive_path must be a bare filename (a single path segment). Delegate the check to the shared
+    # Test-SEBSafeName guard (issue #28 consolidation): it rejects path separators, '..' traversal,
+    # rooted paths, wildcard metacharacters ('*.7z' would otherwise be treated as a Test-Path pattern
+    # and could match an unintended archive), and any invalid filename character, while allowing the
+    # legitimate '{Instance}_{TYPE}_{timestamp}.7z' names the engine writes. The boolean (return-
+    # result) style preserves this helper's existing "unsafe -> Write-Verbose + return $null" contract
+    # (treated upstream as "archive not found"). Test-SEBSafeName resolves because the Logger module
+    # is loaded before IntegrityManager (the sibling Test-SEBChainIntegrity body-calls it the same way).
+    if (-not (Test-SEBSafeName -Name $name)) {
         Write-Verbose "Resolve-SEBChainArchivePath: rejecting unsafe archive_path '$name'."
         return $null
     }

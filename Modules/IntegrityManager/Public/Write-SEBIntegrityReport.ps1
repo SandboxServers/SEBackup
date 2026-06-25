@@ -68,6 +68,15 @@ function Write-SEBIntegrityReport {
         [object]$Report
     )
 
+    # $InstanceName becomes a directory segment, and this function CREATES that directory and WRITES a
+    # file under it -- a write boundary. Guard it through the shared Test-SEBSafeName validator
+    # (issue #28) so a crafted name cannot create/overwrite a file outside the backup root. Write-Error
+    # + return matches this function's existing error-reporting contract (it does not throw).
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
+        Write-Error "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+        return
+    }
+
     $instanceDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName
     $reportPath = Join-Path -Path $instanceDir -ChildPath 'integrity_report.json'
 

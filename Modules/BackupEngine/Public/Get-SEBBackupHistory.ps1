@@ -53,6 +53,14 @@ function Get-SEBBackupHistory {
         [string]$BackupRoot
     )
 
+    # $InstanceName becomes a directory segment (Join-Path $BackupRoot $InstanceName ...). Guard it
+    # through the shared Test-SEBSafeName validator (issue #28) so a crafted name cannot escape the
+    # backup root; boolean style returns this function's empty-array error contract on rejection.
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
+        Write-Error "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+        return @()
+    }
+
     # Resolve the backup root
     if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
         $globalConfig = Get-SEBGlobalConfig

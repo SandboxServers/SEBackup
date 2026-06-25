@@ -86,6 +86,13 @@ function Add-SEBMetric {
         [string]$BackupRoot
     )
 
+    # $InstanceName becomes a filename segment ("<InstanceName>_metrics.json") and this function
+    # WRITES that file -- a write boundary. Guard it through the shared Test-SEBSafeName validator
+    # (issue #28) so a crafted name cannot escape the metrics directory or be treated as a wildcard.
+    # This function throws on write failures, so use the -Throw style for a consistent terminating
+    # error on an unsafe name.
+    Test-SEBSafeName -Name $InstanceName -Throw | Out-Null
+
     $metricsDir = Join-Path -Path $BackupRoot -ChildPath 'Data' | Join-Path -ChildPath 'metrics'
     $metricsFile = Join-Path -Path $metricsDir -ChildPath "${InstanceName}_metrics.json"
 

@@ -37,6 +37,7 @@
         'Get-SEBLogEntries'
         'Start-SEBLogContext'
         'Stop-SEBLogContext'
+        'Test-SEBSafeName'
 
         # ConfigManager
         'Get-SEBGlobalConfig'

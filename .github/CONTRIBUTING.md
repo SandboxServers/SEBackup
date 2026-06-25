@@ -152,12 +152,26 @@ Run tests for a specific module:
 Invoke-Pester -Path ./Tests/ConfigManager.Tests.ps1 -Output Detailed
 ```
 
+### Continuous Integration
+
+`build.ps1` is the single entry point GitHub-hosted CI uses (`.github/workflows/ci.yml`,
+`windows-latest`); run it locally to reproduce CI exactly:
+
+```powershell
+./build.ps1              # PSScriptAnalyzer (Error+ParseError, baselined) + Pester (excludes E2E/Integration)
+./build.ps1 -InstallDeps # also installs the pinned PSToml / Pester / PSScriptAnalyzer versions
+```
+
 ### Test Guidelines
 
 - Unit tests should not require remote nodes or running game servers
 - Mock remote operations with Pester's `Mock` command
 - Test pure logic modules (ManifestManager, ConfigManager) thoroughly
-- Integration tests that require real infrastructure should be clearly marked
+- Integration/E2E tests that require real infrastructure (VSS, WinRM, a running Torch server, or
+  real LocalMachine DPAPI) **must** be tagged `-Tag 'Integration'` or `-Tag 'E2E'` on the
+  `Describe`/`Context`/`It`. `build.ps1` (and thus GitHub-hosted CI) excludes those tags — they
+  can only pass on the local 3-instance Torch harness — so an untagged infra test runs on
+  `windows-latest` and will fail CI.
 
 ## Pull Request Guidelines
 
