@@ -5,9 +5,14 @@ function Remove-SEBCredential {
 
     .DESCRIPTION
         Deletes the DPAPI-encrypted credential file at
-        Credentials/{NodeName}.cred.xml. By default, the user is prompted for
-        confirmation before deletion. Use the -Force switch to suppress the
-        confirmation prompt.
+        Credentials/{NodeName}.cred.xml.
+
+        This function supports the common -WhatIf and -Confirm risk-mitigation
+        parameters via ShouldProcess. Running with -WhatIf reports what would be
+        removed without deleting anything. Running with -Confirm (or when the
+        configured ConfirmImpact would otherwise prompt) requests interactive
+        confirmation before deletion. Use the -Force switch to bypass
+        confirmation for automation.
 
         If the credential file does not exist, a warning is written and no
         error is thrown.
@@ -16,12 +21,16 @@ function Remove-SEBCredential {
         The name of the remote node whose credential should be removed.
 
     .PARAMETER Force
-        Suppresses the confirmation prompt and removes the credential file
-        immediately.
+        Removes the credential file without prompting for confirmation. This is
+        intended for non-interactive/automated use.
 
     .EXAMPLE
         Remove-SEBCredential -NodeName "GameServer01"
-        # Prompts for confirmation, then removes the credential file.
+        # Removes the credential file, prompting for confirmation if required.
+
+    .EXAMPLE
+        Remove-SEBCredential -NodeName "GameServer01" -WhatIf
+        # Reports what would be removed without deleting the file.
 
     .EXAMPLE
         Remove-SEBCredential -NodeName "GameServer01" -Force
@@ -34,7 +43,8 @@ function Remove-SEBCredential {
     .OUTPUTS
         None.
     #>
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [OutputType([void])]
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNullOrEmpty()]
@@ -51,16 +61,15 @@ function Remove-SEBCredential {
         return
     }
 
-    if (-not $Force) {
-        $confirm = Read-Host "Are you sure you want to remove the credential for node '$NodeName'? (Y/N)"
-        if ($confirm -notmatch '^[Yy]') {
-            Write-Verbose "Removal of credential for node '$NodeName' was cancelled by the user."
-            return
-        }
+    # -Force bypasses confirmation for automation; otherwise ShouldProcess handles
+    # -WhatIf (preview, no deletion) and -Confirm (interactive prompt) natively.
+    if (-not ($Force -or $PSCmdlet.ShouldProcess($credentialFile, "Remove credential for node '$NodeName'"))) {
+        return
     }
 
     try {
-        Remove-Item -Path $credentialFile -Force
+        # ShouldProcess already handled confirmation above, so suppress any nested prompt.
+        Remove-Item -Path $credentialFile -Force -Confirm:$false -ErrorAction Stop
         Write-Verbose "Credential removed for node '$NodeName': $credentialFile"
     }
     catch {
