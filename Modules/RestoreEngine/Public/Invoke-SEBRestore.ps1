@@ -256,13 +256,16 @@ function Invoke-SEBRestore {
         # -RetryCount 0 so a transport drop mid-operation does not re-run it. A hard failure
         # throws and aborts before any archive work. Route through the wrapper for
         # logging/reconnect; the block stays node-local.
+        # | Out-Null on each side-effect-only remote block below: the wrapper returns the block's
+        # remote output, and none of these are consumed -- discard them so they never leak into
+        # Invoke-SEBRestore's own output stream (which must be the single result PSCustomObject).
         Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
             param($tempDir)
             if (Test-Path -Path $tempDir -PathType Container) {
                 Remove-Item -Path $tempDir -Recurse -Force -ErrorAction Stop
             }
             New-Item -Path $tempDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-        } -ArgumentList $tempRestoreDir
+        } -ArgumentList $tempRestoreDir | Out-Null
 
         # Extract each archive in chain order
         for ($i = 0; $i -lt $chainValidation.ChainArchives.Count; $i++) {
@@ -301,7 +304,9 @@ function Invoke-SEBRestore {
                 $shareDestPath = Join-Path -Path $sharePath -ChildPath "restore_temp_$(Split-Path -Path $archivePath -Leaf)"
                 $netBandwidthMbps = if ($globalConfig.network.max_bandwidth_mbps) { [int]$globalConfig.network.max_bandwidth_mbps } else { 0 }
                 $netRobocopyIpgMs = if ($globalConfig.network.robocopy_ipg_ms) { [int]$globalConfig.network.robocopy_ipg_ms } else { 0 }
-                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -MaxBandwidthMbps $netBandwidthMbps -RobocopyIpgMs $netRobocopyIpgMs
+                # | Out-Null: discard Copy-SEBThrottled's result object (not consumed) so it does not
+                # leak into Invoke-SEBRestore's output stream.
+                Copy-SEBThrottled -Source $archivePath -Destination $shareDestPath -MaxBandwidthMbps $netBandwidthMbps -RobocopyIpgMs $netRobocopyIpgMs | Out-Null
 
                 # Get the local path on the node for the archive.
                 # Raw Invoke-Command (not the wrapper): -EA SilentlyContinue here means "best effort,
@@ -377,7 +382,7 @@ function Invoke-SEBRestore {
                         Remove-Item -Path $incTempDir -Recurse -Force -ErrorAction SilentlyContinue
                     }
                 }
-            } -ArgumentList $nodeArchiveTempPath, $tempRestoreDir, $archiveType
+            } -ArgumentList $nodeArchiveTempPath, $tempRestoreDir, $archiveType | Out-Null
 
             # Process deleted_files for incrementals
             if ($archiveType -eq 'incremental' -and $archiveManifest.ContainsKey('deleted_files')) {
@@ -394,7 +399,7 @@ function Invoke-SEBRestore {
                                 Remove-Item -Path $fullPath -Force -ErrorAction SilentlyContinue
                             }
                         }
-                    } -ArgumentList $tempRestoreDir, $deletedFiles -ErrorAction SilentlyContinue
+                    } -ArgumentList $tempRestoreDir, $deletedFiles -ErrorAction SilentlyContinue | Out-Null
 
                     if ($hasLogger) {
                         Write-SEBLog -Message "Processed $($deletedFiles.Count) deleted file(s) for sequence $archiveSeq." -Level INFO -Context $InstanceName
@@ -410,7 +415,7 @@ function Invoke-SEBRestore {
                 if (Test-Path -Path $archPath -PathType Leaf) {
                     Remove-Item -Path $archPath -Force -ErrorAction SilentlyContinue
                 }
-            } -ArgumentList $nodeArchiveTempPath -ErrorAction SilentlyContinue
+            } -ArgumentList $nodeArchiveTempPath -ErrorAction SilentlyContinue | Out-Null
         }
 
         # ====================================================================
@@ -581,7 +586,7 @@ function Invoke-SEBRestore {
                     (Get-ChildItem -Path $parentDir -ErrorAction SilentlyContinue).Count -eq 0) {
                     Remove-Item -Path $parentDir -Force -ErrorAction SilentlyContinue
                 }
-            } -ArgumentList $tempRestoreDir -ErrorAction Stop
+            } -ArgumentList $tempRestoreDir -ErrorAction Stop | Out-Null
         }
         catch {
             $warnings.Add("Cleanup of temp restore directory failed: $_")
