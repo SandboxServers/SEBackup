@@ -93,7 +93,7 @@ cd C:\SEBackup
 
 ### What the Script Does
 
-1. **Prompts for credentials** -- Asks you for the username and password of an administrator account on the compute node. These are saved encrypted in `Credentials/GamePC01.cred.xml` using DPAPI.
+1. **Prompts for credentials** -- Asks you for the username and password of an administrator account on the compute node. These are saved encrypted in `Credentials/GamePC01.cred` using LocalMachine-scope DPAPI (machine-bound, so unattended scheduled tasks on this C&C host can decrypt them) with a restrictive file ACL. See [UNATTENDED-AUTH.md](UNATTENDED-AUTH.md).
 
 2. **Creates a node config file** -- Generates `Config/nodes/GamePC01.toml` with the node's hostname and connection details.
 

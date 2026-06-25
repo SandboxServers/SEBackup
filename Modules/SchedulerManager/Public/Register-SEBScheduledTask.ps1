@@ -114,19 +114,42 @@ function Register-SEBScheduledTask {
             -WorkingDirectory $projectRoot
 
         # Build the principal: current user, highest privileges, run whether logged on or not.
-        # NOTE: S4U logon does not load the user's password/profile, so DPAPI-encrypted
-        # credentials (Save-SEBCredential) saved interactively may fail to decrypt under the
-        # task even though they decrypt fine in an interactive session. Warn the operator.
+        # S4U logon loads no user profile and has "no access to encrypted files" (per Microsoft),
+        # which historically broke CurrentUser-DPAPI credentials under the task. As of issue #27,
+        # Save-SEBCredential stores node credentials with LocalMachine-scope DPAPI (machine-bound,
+        # not user-bound) plus a restrictive ACL, so an S4U task on THIS SAME C&C host can decrypt
+        # them unattended. No stored task password or gMSA is required for credential decryption.
         $principal = New-ScheduledTaskPrincipal `
             -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
             -LogonType S4U `
             -RunLevel Highest
 
-        Write-Warning ("Scheduled task '$TaskName' uses S4U logon. DPAPI-encrypted node " +
-            "credentials must be saved as the SAME user this task runs as. If scheduled backups " +
-            "fail to decrypt credentials (while manual runs succeed), re-register the task with a " +
-            "stored password (LogonType Password) or use a group Managed Service Account so the " +
-            "DPAPI master key is available unattended.")
+        Write-Verbose ("Scheduled task '$TaskName' uses S4U logon. Node credentials saved via " +
+            "Save-SEBCredential use LocalMachine-DPAPI (issue #27) and decrypt under this task on " +
+            "the same host. If credentials were saved on a DIFFERENT machine, re-save them on this " +
+            "host with Save-SEBCredential (or Update-SEBCredential) so they are bound to this machine.")
+
+        # An S4U task loads no user profile, so a node still holding ONLY a legacy
+        # CurrentUser-DPAPI .cred.xml cannot be decrypted under it -- that node's
+        # backup will fail until it is re-saved in the machine-bound protected format.
+        # This is the exact pre-#27 state the store migrates, so surface it as a real
+        # WARNING (not Verbose) at registration time rather than letting it fail later.
+        $legacyCreds = Get-ChildItem -Path (Join-Path -Path $projectRoot -ChildPath 'Credentials') -Filter '*.cred.xml' -ErrorAction SilentlyContinue
+        if ($legacyCreds) {
+            # Build the affected-node list FIRST, then concatenate. Without the extra parens
+            # around the pipeline, '-join' binds looser than the string '+', so the array was
+            # stringified with spaces and joined as a single element -- producing a malformed
+            # message. Parenthesizing forces "<node>, <node>" before it is appended.
+            $affectedNodes = ($legacyCreds |
+                ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.BaseName) } |
+                Sort-Object -Unique) -join ', '
+            Write-Warning ("$($legacyCreds.Count) node credential(s) are still in the legacy '.cred.xml' format and will " +
+                "NOT decrypt under this unattended S4U task. Re-save each on THIS host before relying on the task: " +
+                "Save-SEBCredential -NodeName '<node>' (or Update-SEBCredential). Affected: $affectedNodes")
+        }
+        Write-Warning ("The task account ('$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)') must be a local " +
+            "Administrator (or otherwise covered by the credential file ACL: SYSTEM + Administrators + the saving account) to " +
+            "read the protected '.cred' files at run time.")
 
         # Build task settings
         $settings = New-ScheduledTaskSettingsSet `

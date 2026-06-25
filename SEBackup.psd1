@@ -51,6 +51,7 @@
         'Get-SEBCredential'
         'Remove-SEBCredential'
         'Test-SEBCredential'
+        'Update-SEBCredential'
 
         # RemoteManager
         'New-SEBSession'

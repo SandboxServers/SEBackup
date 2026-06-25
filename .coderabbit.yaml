@@ -206,9 +206,15 @@ reviews:
     - path: Modules/CredentialManager/**
       instructions: |
         Focus on credential security:
-        - Credentials are persisted ONLY via DPAPI (Export-Clixml / Import-Clixml).
+        - Node passwords are protected with System.Security.Cryptography.ProtectedData
+          using DataProtectionScope.LocalMachine + per-machine entropy, stored Base64
+          inside the {NodeName}.cred JSON envelope. Binding is machine-only (NOT
+          machine-and-user) by design so S4U scheduled tasks can decrypt. The legacy
+          Export-Clixml .cred.xml (CurrentUser DPAPI) format is read only by the
+          migration path.
         - Never store, log, or echo plaintext passwords or secrets anywhere.
-        - Respect machine-and-user binding of DPAPI; do not introduce portable
+        - The file ACL (SYSTEM + Administrators + saving account; Users removed) is the
+          local confidentiality boundary; do not weaken it or introduce portable
           plaintext fallbacks.
 
     # Remote execution — must go through the wrapper, not raw Invoke-Command

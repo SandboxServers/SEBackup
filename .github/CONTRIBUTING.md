@@ -110,7 +110,7 @@ function Get-SEBExample {
 ### Credentials
 
 - **Never** store plaintext passwords
-- Use `Export-Clixml` / `Import-Clixml` for DPAPI-encrypted credential storage
+- Store node credentials via Save-/Update-SEBCredential, which protect the password with LocalMachine-scope DPAPI (ProtectedData) + per-machine entropy in the {Node}.cred envelope; do not reintroduce Export-Clixml for the write path.
 - Credential files go in `Credentials/` and are `.gitignore`d
 
 ### Remote Execution

@@ -421,8 +421,16 @@ FodyWeavers.xsd
 # SEBackup Project-Specific
 # =============================================================================
 
-# DPAPI-encrypted credential files (machine+user bound, contain secrets)
+# DPAPI-encrypted credential files (contain secrets). Covers the new LocalMachine
+# protected format (*.cred) and the legacy Export-Clixml format (*.cred.xml). The
+# path resolver writes to the project-root Credentials/ directory; the **/Credentials/
+# globs and the Modules/Credentials/ line below are defensive belt-and-suspenders in
+# case the module is ever run from a copied/relocated layout.
+Credentials/*.cred
 Credentials/*.cred.xml
+Modules/Credentials/
+**/Credentials/*.cred
+**/Credentials/*.cred.xml
 
 # Runtime data directories
 Data/backups/

@@ -369,16 +369,27 @@ level_7zip = 3   # Lower = less memory, faster, larger output
 Save-SEBCredential -NodeName "GamePC01"
 ```
 
-### Error: "Key not valid for use in specified state"
+### Error: credential "could not be decrypted" / "re-save it on THIS host"
 
-**Cause:** DPAPI credentials are machine-and-user bound. If you created the credentials as a different user or on a different machine, they cannot be decrypted.
+**Cause:** Node credentials are protected with **LocalMachine-scope DPAPI** — bound to the **machine**, not the user (see [UNATTENDED-AUTH.md](UNATTENDED-AUTH.md)). They decrypt for any process (including an unattended scheduled task) on the **same C&C host**, but a `.cred` file copied from a **different machine** cannot be decrypted (different DPAPI master key and per-machine entropy).
 
-**Solution:** Re-save the credentials using the user account that will run SEBackup:
+**Solution:** Re-save (or rotate) the credentials on the host where SEBackup runs:
+```powershell
+Save-SEBCredential -NodeName "GamePC01"
+# or, to rotate/re-encrypt:
+Update-SEBCredential -NodeName "GamePC01"
+```
+
+Unlike the old behavior, you do **not** need to save credentials as the same user the scheduled task runs as — machine-scope protection means the S4U "run whether logged on or not" task decrypts them regardless, as long as it runs on the same host and the running account is an Administrator. If you moved the C&C to a new machine, re-save there.
+
+### Warning: "legacy credential … could not be read" / "re-save required"
+
+**Cause:** A credential saved by the older `Export-Clixml` (`.cred.xml`) format is sealed with **CurrentUser**-scope DPAPI and can only be read by the user who saved it. SEBackup migrates such files to the new machine-scoped format automatically **when the current account can read them**; if it cannot (e.g. it was saved by a different user), the legacy file is left in place and flagged.
+
+**Solution:** Re-save the credential on this host so it is stored in the machine-readable protected format:
 ```powershell
 Save-SEBCredential -NodeName "GamePC01"
 ```
-
-If you are running SEBackup as a scheduled task, save the credentials while logged in as the same user the scheduled task runs as (usually the same admin account).
 
 ---
 

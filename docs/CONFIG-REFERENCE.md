@@ -129,13 +129,7 @@ Each compute node has its own config file on the C&C machine. The filename (with
 | `hostname` | string | (none) | Hostname or IP address of the compute node. Used for PSRemoting connections. Can be an IP, DNS name, or FQDN. |
 | `username` | string | (none) | Username for the PSRemoting connection. Must have Administrator privileges on the node. The password is stored in the separate credential file, not here. |
 
-**Credentials** are stored separately in `Credentials/{nodename}.cred.xml` using DPAPI encryption. Create them with:
-
-```powershell
-Get-Credential | Export-Clixml -Path "Credentials\gamingpc01.cred.xml"
-```
-
-Or use the `Save-SEBCredential` function:
+**Credentials** are stored separately in `Credentials/{nodename}.cred` using LocalMachine-scope DPAPI (machine-bound so unattended scheduled tasks can decrypt; see [docs/UNATTENDED-AUTH.md](UNATTENDED-AUTH.md)). Create them with the `Save-SEBCredential` function:
 
 ```powershell
 Save-SEBCredential -NodeName "gamingpc01"

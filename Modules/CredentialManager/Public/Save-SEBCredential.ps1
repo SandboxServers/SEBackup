@@ -1,31 +1,38 @@
 function Save-SEBCredential {
     <#
     .SYNOPSIS
-        Saves a PSCredential for a remote SEBackup node as DPAPI-encrypted XML.
+        Saves a PSCredential for a remote SEBackup node using LocalMachine-DPAPI
+        protection so unattended scheduled tasks can decrypt it.
 
     .DESCRIPTION
-        Stores a PSCredential object for the specified node by serializing it to
-        a DPAPI-encrypted XML file using Export-Clixml. The credential file is
-        saved at Credentials/{NodeName}.cred.xml relative to the SEBackup project
-        root.
+        Stores a PSCredential for the specified node in the protected "*.cred"
+        format introduced for issue #27. The username is stored in clear (it is
+        not a secret); the password is encrypted with the Windows Data Protection
+        API using DataProtectionScope.LocalMachine plus a per-machine entropy
+        value, then the ciphertext is written (Base64) inside a small JSON
+        envelope at Credentials/{NodeName}.cred.
 
-        If the -Credential parameter is not provided, the user is prompted
-        interactively via Get-Credential.
+        Why LocalMachine scope: the previous Export-Clixml store sealed the
+        password with CurrentUser-scope DPAPI, which binds it to the saving user's
+        profile. An S4U / "run whether logged on or not" scheduled task has no
+        loaded user profile and (per Microsoft) "no access to encrypted files", so
+        it could not decrypt those credentials -- breaking unattended backups.
+        LocalMachine scope binds the secret to the machine instead, so any process
+        on the SAME C&C host (including that scheduled task) can decrypt it. The
+        wider local reach is constrained by per-machine entropy and a restrictive
+        ACL (SYSTEM + Administrators + the saving account; inherited/Users access
+        removed).
 
-        The Credentials directory is created automatically if it does not exist.
-
-        Because DPAPI encryption is tied to the current Windows user account and
-        machine, credential files can only be decrypted by the same user on the
-        same machine that created them.
+        If -Credential is not provided, the user is prompted via Get-Credential.
+        The Credentials directory is created and hardened automatically.
 
     .PARAMETER NodeName
-        The name of the remote node to store credentials for. This is used as
-        the filename stem for the credential file (e.g., "GameServer01" produces
-        Credentials/GameServer01.cred.xml).
+        The name of the remote node to store credentials for. Used as the filename
+        stem (e.g. "GameServer01" -> Credentials/GameServer01.cred).
 
     .PARAMETER Credential
-        A PSCredential object containing the username and password for the remote
-        node. If not provided, the user is prompted interactively.
+        A PSCredential containing the username and password for the remote node.
+        If not provided, the user is prompted interactively.
 
     .EXAMPLE
         Save-SEBCredential -NodeName "GameServer01"
@@ -44,6 +51,7 @@ function Save-SEBCredential {
         None. The credential is written to disk.
     #>
     [CmdletBinding()]
+    [OutputType([void])]
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNullOrEmpty()]
@@ -60,13 +68,36 @@ function Save-SEBCredential {
         }
     }
 
-    $credentialFile = Resolve-CredentialPath -NodeName $NodeName
-
     try {
-        $Credential | Export-Clixml -Path $credentialFile -Force
+        # Resolve both paths once up front and reuse them (no redundant re-resolves).
+        $credentialFile = Resolve-CredentialPath -NodeName $NodeName
+        $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
+
+        $saved = Write-SEBProtectedCredentialFile -NodeName $NodeName -Credential $Credential
+        if (-not $saved) {
+            throw "Credential protection or file write failed (see log for details)."
+        }
+
+        # If a legacy Clixml file for this node still exists, remove it so the two
+        # stores cannot diverge -- but only after confirming the new protected file
+        # actually decrypts back to the credential we just saved. Otherwise a write
+        # that cannot be read later (entropy fallback divergence) plus a legacy
+        # delete would leave nothing recoverable.
+        if (Test-Path -LiteralPath $legacyFile) {
+            if (Test-SEBProtectedCredentialReadBack -Path $credentialFile -Expected $Credential) {
+                Remove-Item -LiteralPath $legacyFile -Force -ErrorAction SilentlyContinue
+                Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Removed superseded legacy credential file '$legacyFile' for node '$NodeName' (new file verified on read-back)."
+            }
+            else {
+                Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Saved a new protected credential for node '$NodeName' but it did not verify on read-back; KEEPING the legacy file '$legacyFile' as a fallback."
+            }
+        }
+
         Write-Verbose "Credential saved for node '$NodeName' at: $credentialFile"
+        Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Saved credential for node '$NodeName' (user '$($Credential.UserName)') using LocalMachine-DPAPI protected store." -NoConsole
     }
     catch {
+        Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message "Failed to save credential for node '$NodeName': $_"
         throw "Failed to save credential for node '$NodeName': $_"
     }
 }
