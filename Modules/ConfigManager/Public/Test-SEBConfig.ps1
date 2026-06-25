@@ -90,13 +90,9 @@ function Test-SEBConfig {
                     Warnings = $warnings.ToArray()
                 }
             }
-            # Normalize the parsed config to a hashtable tree. ConvertFrom-Toml's nested tables are
-            # ordered dictionaries (and depending on the host/PSToml load context the top level may
-            # be a hashtable while its children are still OrderedDictionary), but the Test-*Config
-            # helpers gate nested sections with "-is [hashtable]". Deep-convert unconditionally
-            # (the converter is a no-op for values already hashtables) so a perfectly valid file no
-            # longer fails with "[instance] must be a table/section, got: OrderedDictionary".
-            $Config = Convert-PSObjectToHashtable -InputObject $Config
+            # ConvertFrom-Toml returns an OrderedDictionary tree (not [hashtable]); the shared
+            # normalization step just below deep-converts it so the Test-*Config helpers' nested
+            # "-is [hashtable]" gates see real hashtables.
         }
         catch {
             $errors.Add("Failed to parse TOML file '$Path': $_")
@@ -106,6 +102,26 @@ function Test-SEBConfig {
                 Warnings = $warnings.ToArray()
             }
         }
+    }
+
+    # Normalize the config to a hashtable tree so the Test-*Config helpers' "-is [hashtable]" gates
+    # match what the engine accepts. Two shapes reach here and both have non-hashtable children:
+    #   - ByPath: ConvertFrom-Toml returns an OrderedDictionary at every level.
+    #   - ByConfig: the [hashtable] cast on -Config coerces only the TOP level to a hashtable when a
+    #     caller passes ConvertFrom-Toml / remoting output, leaving section tables (e.g. vrage_api)
+    #     as OrderedDictionary -- which would otherwise read as "[vrage_api] not set".
+    # Skip the deep copy only when the whole tree is already hashtables (the common in-memory case),
+    # so a config built by Get-SEBGlobalConfig / Get-SEBInstanceConfig is a no-op here.
+    if (-not (Test-IsHashtableTree -InputObject $Config)) {
+        $Config = Convert-PSObjectToHashtable -InputObject $Config
+    }
+
+    # Instance configs accept legacy layouts that Get-SEBInstanceConfig normalizes at load time.
+    # Apply the SAME canonical shim before validating so the validator accepts exactly what the
+    # engine accepts (a legacy [paths]/[smb] config validates with migration warnings, not errors,
+    # and a renamed [vrage_api].key is recognized). Engine-read flat keys live at the top level.
+    if ($Type -eq 'Instance') {
+        $Config = ConvertTo-CanonicalInstanceConfig -InputObject $Config
     }
 
     # Dispatch to type-specific validation
@@ -328,8 +344,11 @@ function Test-InstanceConfig {
     # The instance schema validated here is the canonical one the SEBackup engine reads:
     # the operational values are FLAT top-level keys (world_path, staging_path, share_name,
     # run_mode) plus a nested [vrage_api] table (port / security_key), with [instance] holding
-    # identity metadata. Legacy layouts ([paths]/[smb]/[vss], [vrage_api].key) are accepted with
-    # a warning -- Get-SEBInstanceConfig normalizes them onto the canonical keys at load time.
+    # identity metadata. Legacy layouts ([paths]/[smb], [vrage_api].key) are accepted with a
+    # warning -- Test-SEBConfig runs ConvertTo-CanonicalInstanceConfig (the SAME shim
+    # Get-SEBInstanceConfig applies at load time) before dispatching here, so the canonical keys
+    # are already populated from any legacy source. The legacy sections are left in place by that
+    # non-destructive shim, so the migration warnings below fire on their PRESENCE.
 
     # --- [instance] section (identity metadata) ---
     if (-not $Config.ContainsKey('instance')) {
@@ -350,14 +369,19 @@ function Test-InstanceConfig {
         }
     }
 
+    # Detect the presence of legacy operational sections so we can nudge the operator to
+    # re-register even though the canonical shim has already filled the flat keys from them.
+    $hasLegacyWorldSave = $Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and
+        -not [string]::IsNullOrWhiteSpace($Config.paths.world_save)
+    $hasLegacyStaging = $Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and
+        $Config.paths.ContainsKey('staging_local')
+    $hasLegacyShare = $Config.ContainsKey('smb') -and $Config.smb -is [hashtable] -and
+        -not [string]::IsNullOrWhiteSpace($Config.smb.share_name)
+
     # --- world_path (top-level, required) ---
-    # Accept the legacy [paths].world_save location with a migration warning.
-    $worldPath = $null
-    if ($Config.ContainsKey('world_path')) {
-        $worldPath = $Config['world_path']
-    }
-    elseif ($Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and -not [string]::IsNullOrWhiteSpace($Config.paths.world_save)) {
-        $worldPath = $Config.paths.world_save
+    # The shim promotes legacy [paths].world_save -> world_path; warn if the legacy source remains.
+    $worldPath = if ($Config.ContainsKey('world_path')) { $Config['world_path'] } else { $null }
+    if ($hasLegacyWorldSave) {
         $Warnings.Add("World path found under legacy [paths].world_save. Re-register this instance (or move it to a top-level 'world_path') so it matches the current schema.")
     }
 
@@ -369,12 +393,9 @@ function Test-InstanceConfig {
     }
 
     # --- share_name (top-level, required for archive transfer) ---
-    $shareName = $null
-    if ($Config.ContainsKey('share_name')) {
-        $shareName = $Config['share_name']
-    }
-    elseif ($Config.ContainsKey('smb') -and $Config.smb -is [hashtable] -and -not [string]::IsNullOrWhiteSpace($Config.smb.share_name)) {
-        $shareName = $Config.smb.share_name
+    # The shim promotes legacy [smb].share_name -> share_name; warn if the legacy source remains.
+    $shareName = if ($Config.ContainsKey('share_name')) { $Config['share_name'] } else { $null }
+    if ($hasLegacyShare) {
         $Warnings.Add("Share name found under legacy [smb].share_name. Re-register this instance (or move it to a top-level 'share_name') so it matches the current schema.")
     }
 
@@ -383,9 +404,15 @@ function Test-InstanceConfig {
     }
 
     # --- staging_path (top-level, optional; defaults to C:\SEBackup\staging) ---
-    if (-not $Config.ContainsKey('staging_path') -and
-        -not ($Config.ContainsKey('paths') -and $Config.paths -is [hashtable] -and $Config.paths.ContainsKey('staging_local'))) {
+    # Warn whenever the canonical top-level staging_path is absent, the same way world_path and
+    # share_name surface a migration nudge. (A legacy [paths].staging_local is promoted to
+    # staging_path by the shim, so when only the legacy key existed, staging_path is now present
+    # and this warning correctly stays silent; it fires only when nothing supplied a value.)
+    if (-not $Config.ContainsKey('staging_path')) {
         $Warnings.Add("'staging_path' is not set. The engine will default to 'C:\\SEBackup\\staging'.")
+    }
+    if ($hasLegacyStaging) {
+        $Warnings.Add("Staging path found under legacy [paths].staging_local. Re-register this instance (or move it to a top-level 'staging_path') so it matches the current schema.")
     }
 
     # --- run_mode (top-level, optional; defaults to service) ---
@@ -400,6 +427,20 @@ function Test-InstanceConfig {
         $Warnings.Add("'run_mode' should be 'service' or 'console'. Got: $runMode")
     }
 
+    # --- service_name / process_name (top-level, optional) ---
+    # Read flat by Start-/Stop-SEBTorchServer during a restore: service_name names the Windows
+    # service to stop/start (default "TorchServer_{instance}") and process_name is the image to
+    # wait on for a console-mode server (default "Torch.Server"). When present they must be
+    # non-empty strings -- an empty value would silently override the engine's sane default.
+    foreach ($flatKey in @('service_name', 'process_name')) {
+        if ($Config.ContainsKey($flatKey)) {
+            $value = $Config[$flatKey]
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) {
+                $Errors.Add("'$flatKey' must be a non-empty string when set (it overrides the engine default).")
+            }
+        }
+    }
+
     # --- [vrage_api] section ---
     if ($Config.ContainsKey('vrage_api') -and $Config.vrage_api -is [hashtable]) {
         $vrageApi = $Config.vrage_api
@@ -409,7 +450,9 @@ function Test-InstanceConfig {
                 $Errors.Add("[vrage_api].port must be between 1 and 65535. Got: $port")
             }
         }
-        if ($vrageApi.ContainsKey('key') -and -not $vrageApi.ContainsKey('security_key')) {
+        if ($vrageApi.ContainsKey('key')) {
+            # Warn whenever the legacy field is present. The shim copies [vrage_api].key into
+            # security_key (so the engine still works), but the on-disk file should be migrated.
             $Warnings.Add("[vrage_api].key is the legacy key name. The engine reads [vrage_api].security_key -- rename it (or re-register the instance).")
         }
         if ($vrageApi.ContainsKey('security_key') -and [string]::IsNullOrWhiteSpace($vrageApi.security_key)) {

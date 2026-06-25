@@ -678,6 +678,11 @@ world_path   = "$worldSavePathToml"
 staging_path = "$stagingPathToml"
 share_name   = "$shareNameClean"
 
+# Optional engine-read keys (uncomment to override the defaults). These MUST stay above the first
+# [table] header so they remain top-level keys.
+# service_name = "TorchServer_$InstanceName"  # optional; default TorchServer_{instance}
+# process_name = "Torch.Server"  # optional; console mode
+
 [instance]
 name         = "$InstanceName"
 display_name = "$InstanceName"

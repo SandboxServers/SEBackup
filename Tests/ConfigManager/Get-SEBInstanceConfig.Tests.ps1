@@ -230,6 +230,147 @@ Describe 'Instance TOML canonical schema (Issue #14)' {
         }
     }
 
+    Context 'Test-SEBConfig -Config parity with the engine (Issue #14 review)' {
+
+        # (a) The ByConfig path must validate exactly what Get-SEBInstanceConfig accepts. A caller
+        # who hands in ConvertFrom-Toml output gets a config whose nested tables are
+        # OrderedDictionary (the [hashtable] cast on -Config coerces only the TOP level). Without the
+        # deep normalization in Test-SEBConfig, "$Config.vrage_api -is [hashtable]" is false and
+        # [vrage_api] validation is silently skipped. These tests prove it actually runs.
+        Context 'ByConfig with OrderedDictionary children (ConvertFrom-Toml output)' -Skip:(-not $script:psTomlAvailable) {
+            It 'validates the [vrage_api] table -- an invalid port is an ERROR' {
+                $cfg = ConvertFrom-Toml -InputObject $script:generatedToml
+                $cfg['vrage_api']['port'] = 70000   # out of range
+                $result = Test-SEBConfig -Type Instance -Config $cfg
+                $result.IsValid | Should -BeFalse
+                ($result.Errors -join ' ') | Should -Match 'vrage_api.*port'
+            }
+
+            It 'reports a valid ConvertFrom-Toml config (nested OrderedDictionary) as valid' {
+                $cfg = ConvertFrom-Toml -InputObject $script:generatedToml
+                $result = Test-SEBConfig -Type Instance -Config $cfg
+                $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            }
+        }
+
+        # (b) A legacy [paths]/[smb] config is what the engine STILL accepts (Get-SEBInstanceConfig
+        # normalizes it). The validator must therefore accept it too: migration WARNINGS, never hard
+        # "world_path/share_name missing" ERRORS.
+        It 'accepts a legacy [paths]/[smb] config with WARNINGS, not ERRORS' {
+            $legacy = @{
+                instance  = @{ name = 'Legacy'; display_name = 'Legacy'; run_mode = 'console' }
+                paths     = @{ world_save = 'C:\TorchServers\Legacy\Saves\W'; staging_local = 'E:\stage\Legacy' }
+                smb       = @{ share_name = 'SEBackup_Legacy$' }
+                vrage_api = @{ port = 8081; key = 'legacykey' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $legacy
+
+            $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            $result.Errors.Count | Should -Be 0
+            # The migration nudges for each legacy section must surface.
+            ($result.Warnings -join ' ') | Should -Match 'world_save'
+            ($result.Warnings -join ' ') | Should -Match 'share_name'
+            ($result.Warnings -join ' ') | Should -Match 'staging_local'
+        }
+
+        It 'does not mutate the caller hashtable passed to -Config' {
+            # The shim is non-destructive; Test-SEBConfig must not promote legacy keys onto the
+            # caller's object.
+            $legacy = @{
+                instance  = @{ name = 'Legacy'; run_mode = 'console' }
+                paths     = @{ world_save = 'C:\W\Saves\L'; staging_local = 'E:\stage\L' }
+                smb       = @{ share_name = 'SEBackup_L$' }
+                vrage_api = @{ port = 8081; key = 'legacykey' }
+            }
+            $null = Test-SEBConfig -Type Instance -Config $legacy
+
+            $legacy.ContainsKey('world_path') | Should -BeFalse
+            $legacy.ContainsKey('share_name') | Should -BeFalse
+            $legacy['vrage_api'].ContainsKey('security_key') | Should -BeFalse
+        }
+
+        It 'requires service_name to be a non-empty string when present' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = 'D:\stage\X'
+                share_name   = 'SEBackup_X$'
+                service_name = ''   # empty would silently override the engine default
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeFalse
+            ($result.Errors -join ' ') | Should -Match 'service_name'
+        }
+
+        It 'accepts valid service_name and process_name without warnings about them' {
+            $cfg = @{
+                instance     = @{ name = 'X'; display_name = 'X' }
+                world_path   = 'C:\W\Saves\X'
+                staging_path = 'D:\stage\X'
+                share_name   = 'SEBackup_X$'
+                service_name = 'TorchServer_X'
+                process_name = 'Torch.Server'
+                vrage_api    = @{ port = 8080; security_key = 'k' }
+            }
+            $result = Test-SEBConfig -Type Instance -Config $cfg
+            $result.IsValid | Should -BeTrue -Because "validator errors: $($result.Errors -join '; ')"
+            ($result.Warnings -join ' ') | Should -Not -Match 'service_name'
+            ($result.Warnings -join ' ') | Should -Not -Match 'process_name'
+        }
+    }
+
+    # (c) The canonical shim itself must be non-destructive. Exercised directly in module scope
+    # (it is a Private function) so a regression in the cloning is caught even if the Test-SEBConfig
+    # wiring changes.
+    Context 'ConvertTo-CanonicalInstanceConfig is non-destructive (Private helper)' {
+        It 'leaves the input hashtable unchanged while returning a normalized copy' {
+            $result = InModuleScope ConfigManager {
+                $source = @{
+                    instance  = @{ name = 'L'; run_mode = 'console' }
+                    paths     = @{ world_save = 'C:\W\Saves\L'; staging_local = 'E:\stage\L' }
+                    smb       = @{ share_name = 'SEBackup_L$' }
+                    vrage_api = @{ port = 8081; key = 'legacykey' }
+                }
+                $out = ConvertTo-CanonicalInstanceConfig -InputObject $source
+
+                [PSCustomObject]@{
+                    InputUntouchedTop   = (-not $source.ContainsKey('world_path')) -and (-not $source.ContainsKey('share_name'))
+                    InputUntouchedVrage = -not $source['vrage_api'].ContainsKey('security_key')
+                    OutWorldPath        = $out['world_path']
+                    OutShareName        = $out['share_name']
+                    OutStagingPath      = $out['staging_path']
+                    OutRunMode          = $out['run_mode']
+                    OutSecurityKey      = $out['vrage_api']['security_key']
+                    DifferentReference  = -not [object]::ReferenceEquals($source, $out)
+                }
+            }
+
+            $result.InputUntouchedTop   | Should -BeTrue
+            $result.InputUntouchedVrage | Should -BeTrue
+            $result.DifferentReference  | Should -BeTrue
+            # And the returned copy is fully normalized to the canonical keys.
+            $result.OutWorldPath   | Should -Be 'C:\W\Saves\L'
+            $result.OutShareName   | Should -Be 'SEBackup_L$'
+            $result.OutStagingPath | Should -Be 'E:\stage\L'
+            $result.OutRunMode     | Should -Be 'console'
+            $result.OutSecurityKey | Should -Be 'legacykey'
+        }
+
+        It 'returns the SAME reference for an already-canonical config (fast path, no copy)' {
+            $isSameRef = InModuleScope ConfigManager {
+                $canon = @{
+                    world_path = 'C:\W\Saves\X'
+                    share_name = 'SEBackup_X$'
+                    vrage_api  = @{ port = 8080; security_key = 'k' }
+                }
+                $out = ConvertTo-CanonicalInstanceConfig -InputObject $canon
+                [object]::ReferenceEquals($canon, $out)
+            }
+            $isSameRef | Should -BeTrue
+        }
+    }
+
     Context 'Back-compat shim normalizes a legacy instance config' -Skip:(-not $script:psTomlAvailable) {
         BeforeAll {
             Mock Get-SEBGlobalConfig -ModuleName ConfigManager {
