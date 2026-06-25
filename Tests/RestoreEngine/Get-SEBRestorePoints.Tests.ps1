@@ -56,7 +56,12 @@ BeforeAll {
             [string]$ChainId,
             [int]$Seq,
             [string]$ArchiveName,
-            [string]$Timestamp
+            [string]$Timestamp,
+            # The engine (New-SEBManifest) sets parent_manifest to the PREVIOUS manifest's filename,
+            # NOT a static 'parent.json'. Callers building an incremental must pass the actual prior
+            # manifest's leaf name so the fixture matches engine-produced manifests. Fulls have no
+            # parent ($null), matching New-SEBManifest.
+            [string]$ParentManifest
         )
         if (-not $Timestamp) { $Timestamp = [datetime]::UtcNow.ToString('o') }
         $m = @{
@@ -64,7 +69,7 @@ BeforeAll {
             type               = $Type
             chain_id           = $ChainId
             chain_sequence     = $Seq
-            parent_manifest    = $(if ($Type -eq 'incremental') { 'parent.json' } else { $null })
+            parent_manifest    = $(if ($Type -eq 'incremental') { $ParentManifest } else { $null })
             timestamp          = $Timestamp
             files              = @{ 'Sandbox.sbc' = @{ size = 1; sha256 = ('a' * 64); last_write = $Timestamp } }
             deleted_files      = @()
@@ -101,12 +106,16 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
             New-Archive -Dir $tree.Inc  -Name 'PvPArena_INC_20260227_110000.7z'  | Out-Null
             New-Archive -Dir $tree.Inc  -Name 'PvPArena_INC_20260227_120000.7z'  | Out-Null
 
+            # parent_manifest chains to the PREVIOUS manifest's leaf name (as New-SEBManifest writes):
+            # seq 1 -> the full's manifest, seq 2 -> the seq-1 incremental's manifest.
             New-EngineManifest -Dir $tree.Manifests -Name 'PvPArena_FULL_20260227_100000.json' `
                 -Type 'full' -ChainId $chainId -Seq 0 -ArchiveName 'PvPArena_FULL_20260227_100000.7z' -Timestamp $tsFull
             New-EngineManifest -Dir $tree.Manifests -Name 'PvPArena_INC_20260227_110000.json' `
-                -Type 'incremental' -ChainId $chainId -Seq 1 -ArchiveName 'PvPArena_INC_20260227_110000.7z' -Timestamp $tsInc1
+                -Type 'incremental' -ChainId $chainId -Seq 1 -ArchiveName 'PvPArena_INC_20260227_110000.7z' -Timestamp $tsInc1 `
+                -ParentManifest 'PvPArena_FULL_20260227_100000.json'
             New-EngineManifest -Dir $tree.Manifests -Name 'PvPArena_INC_20260227_120000.json' `
-                -Type 'incremental' -ChainId $chainId -Seq 2 -ArchiveName 'PvPArena_INC_20260227_120000.7z' -Timestamp $tsInc2
+                -Type 'incremental' -ChainId $chainId -Seq 2 -ArchiveName 'PvPArena_INC_20260227_120000.7z' -Timestamp $tsInc2 `
+                -ParentManifest 'PvPArena_INC_20260227_110000.json'
         }
 
         AfterAll {
@@ -202,8 +211,11 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
 
             New-EngineManifest -Dir $tree.Manifests -Name 'Survival_FULL_20260301_000000.json' `
                 -Type 'full' -ChainId $chainId -Seq 0 -ArchiveName 'Survival_FULL_20260301_000000.7z'
+            # parent_manifest is the full's manifest leaf, as the engine would write; the chain is
+            # broken only because the incremental's ARCHIVE is missing, not its parent linkage.
             New-EngineManifest -Dir $tree.Manifests -Name 'Survival_INC_20260301_010000.json' `
-                -Type 'incremental' -ChainId $chainId -Seq 1 -ArchiveName 'Survival_INC_20260301_010000.7z'
+                -Type 'incremental' -ChainId $chainId -Seq 1 -ArchiveName 'Survival_INC_20260301_010000.7z' `
+                -ParentManifest 'Survival_FULL_20260301_000000.json'
         }
 
         AfterAll {
@@ -234,11 +246,13 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
         }
     }
 
-    Context 'rejects a path-traversal InstanceName (security)' {
+    Context 'InstanceName guard rejects traversal but allows valid names (security)' {
         # $InstanceName is concatenated into the backup path (Join-Path $BackupRoot $InstanceName).
-        # The ValidatePattern guard ('^[A-Za-z0-9_-]+$') must reject anything containing path
-        # separators or '..' so discovery cannot be steered outside $BackupRoot. A ValidatePattern
-        # violation is a terminating parameter-binding error, so the call throws.
+        # The guard mirrors New-SEBLockFile EXACTLY (issue #28 will consolidate them): it rejects
+        # path separators, '..' traversal, rooted paths, wildcards, and invalid filename chars, but
+        # ALLOWS legitimate names containing '.' or spaces (config and New-SEBLockFile accept those).
+        # The guard is a [ValidateScript] that throws, so a rejected value is a terminating
+        # parameter-binding error and the call throws.
         It 'throws on a traversal value like ..\evil' {
             { Get-SEBRestorePoints -InstanceName '..\evil' -BackupRoot 'C:\Backups' } | Should -Throw
         }
@@ -247,13 +261,37 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
             { Get-SEBRestorePoints -InstanceName '../evil' -BackupRoot 'C:\Backups' } | Should -Throw
         }
 
+        It 'throws on a bare forward-slash path segment (a/b)' {
+            { Get-SEBRestorePoints -InstanceName 'a/b' -BackupRoot 'C:\Backups' } | Should -Throw
+        }
+
         It 'throws on an absolute-path-like value' {
             { Get-SEBRestorePoints -InstanceName 'C:\Windows' -BackupRoot 'C:\Backups' } | Should -Throw
         }
 
+        It 'throws on a rooted value like C:\x' {
+            { Get-SEBRestorePoints -InstanceName 'C:\x' -BackupRoot 'C:\Backups' } | Should -Throw
+        }
+
+        It 'ACCEPTS a name containing a dot (e.g. PvP.Arena) -- the relaxed guard no longer over-rejects' {
+            # 'PvP.Arena' has no separators/traversal/wildcards/rooting, so it is a legitimate
+            # instance name. The previous '^[A-Za-z0-9_-]+$' pattern wrongly rejected it; the
+            # New-SEBLockFile-aligned guard must accept it. No backups under this fresh root, so the
+            # function returns an empty set rather than throwing.
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sebrp_" + [guid]::NewGuid().ToString('n'))
+            New-Item -Path $root -ItemType Directory -Force | Out-Null
+            try {
+                { Get-SEBRestorePoints -InstanceName 'PvP.Arena' -BackupRoot $root } | Should -Not -Throw
+                @(Get-SEBRestorePoints -InstanceName 'PvP.Arena' -BackupRoot $root) | Should -HaveCount 0
+            }
+            finally {
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
         It 'still accepts a normal hyphen/underscore instance name' {
-            # A name that satisfies the pattern must NOT be rejected by the validator. There are no
-            # backups under this fresh root, so the function returns an empty set rather than throwing.
+            # A name with no disallowed characters must NOT be rejected by the validator. There are
+            # no backups under this fresh root, so the function returns an empty set, not a throw.
             $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sebrp_" + [guid]::NewGuid().ToString('n'))
             New-Item -Path $root -ItemType Directory -Force | Out-Null
             try {

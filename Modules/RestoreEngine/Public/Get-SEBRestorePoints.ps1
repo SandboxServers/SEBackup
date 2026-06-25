@@ -40,11 +40,23 @@ function Get-SEBRestorePoints {
         [ValidateNotNullOrEmpty()]
         # $InstanceName is concatenated into a filesystem path (Join-Path $BackupRoot $InstanceName).
         # Without this guard, a value like '..\..\x' would escape $BackupRoot and let discovery walk
-        # arbitrary directories. The pattern matches the manifest/instance naming convention
-        # (alphanumerics, underscore, hyphen) and rejects path separators, '.', ':' and wildcards.
-        # NOTE: a shared traversal validator is planned in issue #28; this inline guard is the
-        # immediate fix.
-        [ValidatePattern('^[A-Za-z0-9_-]+$')]
+        # arbitrary directories. This mirrors New-SEBLockFile's instance-name guard EXACTLY so the
+        # two stay consistent: reject path separators, '..' traversal, rooted paths, wildcard
+        # metacharacters, and any invalid filename characters -- but ALLOW legitimate names that
+        # contain '.', spaces, etc. (which config and New-SEBLockFile accept). An earlier
+        # '^[A-Za-z0-9_-]+$' pattern here was stricter than the rest of the codebase and wrongly
+        # rejected valid instance names like 'PvP.Arena'.
+        # NOTE: issue #28 will consolidate this into a single shared traversal/filename validator;
+        # this inline guard is the immediate fix and is kept in lockstep with New-SEBLockFile.
+        [ValidateScript({
+            if ($_ -match '[\\/]' -or $_.Contains('..') -or
+                [System.IO.Path]::IsPathRooted($_) -or
+                $_ -match '[\*\?\[\]]' -or
+                $_.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+                throw "Invalid InstanceName '$_': path separators, traversal, wildcards, and invalid filename characters are not allowed."
+            }
+            $true
+        })]
         [string]$InstanceName,
 
         [Parameter()]
