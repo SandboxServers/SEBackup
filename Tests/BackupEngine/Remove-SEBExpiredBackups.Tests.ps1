@@ -128,11 +128,10 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
             Set-Content -LiteralPath $incA -Value 'a' -NoNewline
             Set-Content -LiteralPath $incB -Value 'b' -NoNewline
 
-            # Keep 0 fulls so ALL three are expired and run through the deletion loop.
-            # Sorted DESC: [corrupt, 20260301(A), 20260101(B)]. The corrupt name is processed
-            # FIRST: under the #8 bug $fullTimestamp would be unset (or carry a stale value from a
-            # prior call) and could target the wrong/no manifest; under the fix it is skipped, and
-            # each dated full then prunes ONLY its own chain by its own timestamp.
+            # Keep 0 fulls so both VALID chains expire. The corrupt name (no timestamp) is
+            # partitioned out BEFORE the keep/expired selection -- under the #8 bug it could reach
+            # the deletion loop and reuse a stale $fullTimestamp, pruning the wrong chain; under the
+            # fix it is logged and skipped, and each dated full prunes ONLY its own chain.
             $config = @{
                 storage   = @{ cc_backup_root = $cc; nas_backup_path = $null }
                 retention = @{ cc_full_count = 0; nas_retention_days = 30 }
@@ -196,10 +195,10 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
             $keepManifest = Join-Path $ccManifests 'Survival_FULL_20260301_000000.json'
             $keepIncMan   = Join-Path $ccManifests 'Survival_INC_20260302_000000.json'
 
-            # Keep the newest valid full only. DESC order: [keep(20260301), stray(20260201_xxxxxx), exp(20260101)].
-            # Keep=1 retains 'keep'; expired set = [stray, exp]. The stray is processed FIRST in the
-            # expired loop -- under the bug $fullTimestamp would be unset/stale and could target the
-            # wrong manifest; under the fix it is skipped, then 'exp' prunes ONLY chainExp.
+            # The stray (no timestamp) is partitioned out BEFORE the keep count, so the parseable
+            # fulls are [keep(20260301), exp(20260101)]: keep=1 retains 'keep' and expires only
+            # 'exp'. (Pre-fix the stray could land in the expired loop and reuse a stale
+            # $fullTimestamp, pruning the wrong chain.)
             $config = @{
                 storage   = @{ cc_backup_root = $cc; nas_backup_path = $null }
                 retention = @{ cc_full_count = 1; nas_retention_days = 30 }
@@ -225,7 +224,7 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
         finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    It 'an unparseable full sorting into the keep window does not consume a keep slot' {
+    It 'An unparseable full sorting into the keep window does not consume a keep slot' {
         $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sebret_" + [guid]::NewGuid().ToString('n'))
         $cc = Join-Path $root 'cc'
         $inst = 'Survival'
