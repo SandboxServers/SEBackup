@@ -86,10 +86,24 @@ function Get-SEBInstanceConfig {
         return $null
     }
 
-    # Convert deserialized PSObject back to hashtable if needed (remoting can deserialize differently)
-    if ($instanceConfig -isnot [hashtable]) {
+    # Convert deserialized PSObject back to hashtable if needed (remoting can deserialize
+    # differently). PSToml's ConvertFrom-Toml also returns an ordered dictionary rather than a
+    # [hashtable], and remoting can hand it back as a PSCustomObject or a dictionary depending on
+    # the transport -- Convert-PSObjectToHashtable normalizes all of those shapes to a hashtable so
+    # the downstream Merge-ConfigOverrides (which requires [hashtable]) binds cleanly.
+    #
+    # A SHALLOW "-isnot [hashtable]" guard is not enough: remoting/PSToml can hand back a top-level
+    # [hashtable] whose NESTED tables are still OrderedDictionary/PSCustomObject. That would skip
+    # conversion here, leaving ConvertTo-CanonicalInstanceConfig's "-is [hashtable]" section checks
+    # to miss legacy [paths]/[smb]/[vrage_api] tables and Merge-ConfigOverrides (which only recurses
+    # when BOTH sides are [hashtable]) to clobber instead of deep-merge them. Test-IsHashtableTree
+    # walks the whole tree, so we normalize unless EVERY dictionary descendant is already a hashtable.
+    if (-not (Test-IsHashtableTree -InputObject $instanceConfig)) {
         $instanceConfig = Convert-PSObjectToHashtable -InputObject $instanceConfig
     }
+
+    # Normalize legacy instance-config layouts to the canonical schema the engine reads.
+    $instanceConfig = ConvertTo-CanonicalInstanceConfig -InputObject $instanceConfig
 
     # Get global config to use as defaults
     $globalConfig = Get-SEBGlobalConfig
@@ -123,52 +137,4 @@ function Get-SEBInstanceConfig {
     $merged['_NodeName'] = $Session.ComputerName
 
     return $merged
-}
-
-function Convert-PSObjectToHashtable {
-    <#
-    .SYNOPSIS
-        Converts a PSCustomObject (from remoting deserialization) to a hashtable.
-
-    .DESCRIPTION
-        Internal helper that recursively converts PSCustomObject instances returned
-        from Invoke-Command back into hashtables for consistent handling.
-
-    .PARAMETER InputObject
-        The PSCustomObject to convert.
-
-    .OUTPUTS
-        System.Collections.Hashtable
-    #>
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory)]
-        $InputObject
-    )
-
-    if ($InputObject -is [hashtable]) {
-        $result = @{}
-        foreach ($key in $InputObject.Keys) {
-            $result[$key] = Convert-PSObjectToHashtable -InputObject $InputObject[$key]
-        }
-        return $result
-    }
-    elseif ($InputObject -is [System.Management.Automation.PSCustomObject]) {
-        $result = @{}
-        foreach ($prop in $InputObject.PSObject.Properties) {
-            $result[$prop.Name] = Convert-PSObjectToHashtable -InputObject $prop.Value
-        }
-        return $result
-    }
-    elseif ($InputObject -is [System.Collections.IList]) {
-        $list = [System.Collections.Generic.List[object]]::new()
-        foreach ($item in $InputObject) {
-            $list.Add((Convert-PSObjectToHashtable -InputObject $item))
-        }
-        return $list.ToArray()
-    }
-    else {
-        return $InputObject
-    }
 }

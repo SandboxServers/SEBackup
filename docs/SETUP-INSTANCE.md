@@ -67,9 +67,9 @@ The script will prompt you for information about this Torch instance:
 2. **World save path** -- The full path to the world save data on the compute node. The script will try to detect this automatically based on the Torch install path. If it cannot find it, you will need to provide it manually.
    Example: `C:\TorchServers\PvPArena\Instance\Saves\PvPWorld`
 
-3. **VRage API port** -- The TCP port for the Remote API (default: 8080).
+3. **VRage API port** -- The TCP port for the Remote API (default: 8080). Written to `[vrage_api].port` in the instance config.
 
-4. **VRage API key** -- The `RemoteApiKey` value from `SpaceEngineers-Dedicated.cfg`.
+4. **VRage API key** -- The `RemoteApiKey` value from `SpaceEngineers-Dedicated.cfg`. Written to `[vrage_api].security_key` in the instance config (that is the field name the engine reads).
 
 ## What the Script Does
 
@@ -173,14 +173,14 @@ Each instance must have:
 
 ## Disabling an Instance
 
-To temporarily stop backing up an instance without removing its configuration, edit the instance config on the compute node:
+To stop backing up an instance, omit it from your scheduled/manual backup runs (the orchestrator drives backups per `-InstanceName`). The instance config on the node can carry a `[backup]` section for documentation and future use:
 
 ```toml
 [backup]
 enabled = false
 ```
 
-To re-enable it later, set `enabled = true`.
+Note: the current engine does not yet read `[backup].enabled` to gate a run automatically -- control which instances run from the C&C side. (Honoring `enabled` is tracked as a future enhancement.)
 
 ## What is Next?
 

@@ -237,7 +237,7 @@ vssadmin delete shadows /shadow={shadow-copy-id}
    ```
    C:\SEBackup\instances\{instance}.toml
    ```
-   Under `[vrage_api]`, `key = "..."`.
+   Under `[vrage_api]`, `security_key = "..."`.
 
 3. The keys must match exactly (they are case-sensitive).
 
