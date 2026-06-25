@@ -54,16 +54,26 @@ function Remove-SEBCredential {
         [switch]$Force
     )
 
+    # -Force suppresses the interactive confirmation prompt for automation by lowering
+    # $ConfirmPreference in this scope. ShouldProcess is STILL consulted below, so -WhatIf
+    # always wins (it returns $false and prevents deletion even when -Force is supplied).
+    # An explicit -Confirm still overrides -Force, so honor it when the caller passed it.
+    if ($Force -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+        $ConfirmPreference = 'None'
+    }
+
     $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
-    if (-not (Test-Path -Path $credentialFile)) {
+    # -LiteralPath: $credentialFile is a resolved path, not a pattern -- avoid treating
+    # any [ or ] in the resolved path as a wildcard during the existence check.
+    if (-not (Test-Path -LiteralPath $credentialFile)) {
         Write-Warning "No credential file found for node '$NodeName' at: $credentialFile"
         return
     }
 
-    # -Force bypasses confirmation for automation; otherwise ShouldProcess handles
-    # -WhatIf (preview, no deletion) and -Confirm (interactive prompt) natively.
-    if (-not ($Force -or $PSCmdlet.ShouldProcess($credentialFile, "Remove credential for node '$NodeName'"))) {
+    # ShouldProcess is always consulted: -WhatIf returns $false (preview, no deletion),
+    # -Confirm/ConfirmImpact prompt interactively unless suppressed (e.g. by -Force above).
+    if (-not $PSCmdlet.ShouldProcess($credentialFile, "Remove credential for node '$NodeName'")) {
         return
     }
 

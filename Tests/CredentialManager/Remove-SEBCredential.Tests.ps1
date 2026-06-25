@@ -55,9 +55,34 @@ Describe 'Remove-SEBCredential' {
             Test-Path -LiteralPath $script:credFile | Should -BeFalse
         }
 
-        It '-WhatIf:$false takes precedence over an ambient $WhatIfPreference and deletes' {
-            # Even if the session globally requested -WhatIf, an explicit -Force must delete.
+        It '-Force together with -WhatIf does NOT delete (WhatIf always wins)' {
+            # Regression guard for the core fix: -Force must never bypass -WhatIf. Previously
+            # the guard short-circuited on $Force and skipped ShouldProcess, so -Force -WhatIf
+            # deleted the file. Now ShouldProcess is always consulted; an explicit -WhatIf
+            # binds on the call (so it DOES reach the module), returns $false, and the file
+            # must survive even though -Force was supplied.
+            Remove-SEBCredential -NodeName $script:testNode -Force -WhatIf
+            Test-Path -LiteralPath $script:credFile | Should -BeTrue
+        }
+
+        It '-WhatIf alone (no -Force) does not delete' {
+            # Sanity check that the plain -WhatIf path -- which a user is most likely to run
+            # first against a destructive command -- previews without deleting.
+            Remove-SEBCredential -NodeName $script:testNode -WhatIf
+            Test-Path -LiteralPath $script:credFile | Should -BeTrue
+        }
+
+        It '-Force -WhatIf:$false deletes (explicit -WhatIf:$false plus -Force)' {
+            # The mirror of the regression guard: with WhatIf explicitly disabled, -Force
+            # suppresses the ConfirmImpact=High prompt and deletion proceeds non-interactively.
             Remove-SEBCredential -NodeName $script:testNode -Force -WhatIf:$false
+            Test-Path -LiteralPath $script:credFile | Should -BeFalse
+        }
+
+        It '-Force -Confirm:$false deletes (explicit -Confirm not overridden by -Force)' {
+            # -Force lowers $ConfirmPreference only when -Confirm was not explicitly bound;
+            # passing -Confirm:$false alongside -Force still suppresses the prompt and deletes.
+            Remove-SEBCredential -NodeName $script:testNode -Force -Confirm:$false
             Test-Path -LiteralPath $script:credFile | Should -BeFalse
         }
     }
