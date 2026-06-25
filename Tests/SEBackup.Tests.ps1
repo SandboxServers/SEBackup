@@ -178,14 +178,17 @@ Describe 'ConfigManager Module' {
         }
     }
 
-    Context 'Module functions exist' -Skip:(-not $script:psTomlAvailable) {
-        BeforeAll {
-            $configMgrPath = Join-Path $ModulesPath 'ConfigManager\ConfigManager.psm1'
-            if (Test-Path $configMgrPath) {
-                Import-Module $configMgrPath -Force -DisableNameChecking
-            }
+    BeforeAll {
+        # Import at the Describe level so BOTH contexts below have ConfigManager available,
+        # including when a single context/test is run in isolation (filtered run) -- a
+        # context-scoped import would leave 'Global config loading' without Get-SEBGlobalConfig.
+        $configMgrPath = Join-Path $ModulesPath 'ConfigManager\ConfigManager.psm1'
+        if (Test-Path $configMgrPath) {
+            Import-Module $configMgrPath -Force -DisableNameChecking
         }
+    }
 
+    Context 'Module functions exist' -Skip:(-not $script:psTomlAvailable) {
         It 'Function exists: <_>' -ForEach @(
             'Get-SEBGlobalConfig', 'Get-SEBNodeConfig', 'Get-SEBInstanceConfig',
             'Get-SEBAllInstanceConfigs', 'Test-SEBConfig'
