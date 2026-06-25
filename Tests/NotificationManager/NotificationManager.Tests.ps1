@@ -86,7 +86,11 @@ Describe 'New-SEBDiscordEmbed (embed construction)' {
             $names | Should -Contain 'Duration'
             $names | Should -Contain 'Size'
             ($p.embeds[0].fields | Where-Object name -eq 'Duration').value | Should -Be '3m'
-            ($p.embeds[0].fields | ForEach-Object { $_.inline }) | Should -Not -Contain $false
+            # Assert inline POSITIVELY: every field's inline must be $true. The old
+            # '... | Should -Not -Contain $false' passed vacuously if the inline key were dropped
+            # (each element would be $null, never $false). Here a dropped/non-true inline FAILS.
+            @($p.embeds[0].fields | ForEach-Object { $_.inline }) | Should -Be @($true, $true)
+            ($p.embeds[0].fields | Where-Object { $_.inline -ne $true }) | Should -BeNullOrEmpty
         }
     }
 

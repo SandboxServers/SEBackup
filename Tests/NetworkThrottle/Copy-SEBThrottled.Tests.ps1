@@ -101,6 +101,10 @@ Describe 'Copy-SEBThrottled :: Strategy 2 (Robocopy /IPG throttling)' {
     It 'derives the /IPG gap from MaxBandwidthMbps (10 Mbps -> /IPG:52)' {
         $r = Copy-SEBThrottled -Source $script:srcDir -Destination $script:dstDir -MaxBandwidthMbps 10
         $r.Method | Should -Be 'Robocopy'
+        # The first two positional args ARE the copy itself; without pinning them the /IPG / /E checks
+        # could pass while robocopy copied the wrong source to the wrong destination.
+        $script:roboArgs[0] | Should -Be $script:srcDir
+        $script:roboArgs[1] | Should -Be $script:dstDir
         ($script:roboArgs -join ' ') | Should -Match '/IPG:52'
         ($script:roboArgs -join ' ') | Should -Match '/E'   # recursive directory copy
     }
@@ -114,6 +118,9 @@ Describe 'Copy-SEBThrottled :: Strategy 2 (Robocopy /IPG throttling)' {
     It 'omits /IPG entirely when no throttle is configured (robocopy still used for reliability)' {
         $r = Copy-SEBThrottled -Source $script:srcDir -Destination $script:dstDir
         $r.Method | Should -Be 'Robocopy'
+        # Still the real copy: source/destination must be present and correct on the no-throttle branch.
+        $script:roboArgs[0] | Should -Be $script:srcDir
+        $script:roboArgs[1] | Should -Be $script:dstDir
         ($script:roboArgs -join ' ') | Should -Not -Match '/IPG:'
     }
 
@@ -126,6 +133,48 @@ Describe 'Copy-SEBThrottled :: Strategy 2 (Robocopy /IPG throttling)' {
     It 'treats robocopy exit codes 0-7 as success (e.g. 1 = files copied)' {
         Mock robocopy -ModuleName NetworkThrottle { $global:LASTEXITCODE = 1; '' }
         { Copy-SEBThrottled -Source $script:srcDir -Destination $script:dstDir -MaxBandwidthMbps 10 } | Should -Not -Throw
+    }
+
+    It 'for a single-file source, robocopy gets the (srcDir, destDir, filename) triplet -- not a file as arg2' {
+        # Robocopy's 2nd arg must be a DIRECTORY; a leaf source is split into srcDir + filename so the
+        # file is selected by pattern. Pin all three positionals. The mock "lands" the file robocopy
+        # would have produced (<destDir>\<sourceName>) so the function's post-copy verify passes
+        # naturally without a real network copy.
+        $script:roboArgs = $null
+        Mock robocopy -ModuleName NetworkThrottle {
+            $script:roboArgs = $args
+            Copy-Item -LiteralPath (Join-Path $args[0] $args[2]) -Destination (Join-Path $args[1] $args[2]) -Force
+            $global:LASTEXITCODE = 0
+            ''
+        }
+        $expectedSrcDir = [System.IO.Path]::GetDirectoryName($script:srcFile)
+        $expectedFile = [System.IO.Path]::GetFileName($script:srcFile)
+        $r = Copy-SEBThrottled -Source $script:srcFile -Destination $script:dstDir -MaxBandwidthMbps 10
+        $r.Method | Should -Be 'Robocopy'
+        $script:roboArgs[0] | Should -Be $expectedSrcDir          # source DIRECTORY
+        $script:roboArgs[1] | Should -Be $script:dstDir           # destination DIRECTORY
+        $script:roboArgs[2] | Should -Be $expectedFile            # filename pattern (arg2 is NOT a path)
+        ($script:roboArgs -join ' ') | Should -Match '/IPG:52'
+    }
+
+    It 'silently ignores -Credential on the robocopy path (robocopy cannot accept a PSCredential)' {
+        # HONESTY GUARD: robocopy is a native exe invoked as `& robocopy @args`; the function never
+        # references $Credential on either robocopy branch. So a -Credential is DROPPED with no warning
+        # -- assert exactly that (no false impression the credential is honored): the copy still runs,
+        # no warning is emitted, and the credential never appears anywhere in the robocopy arg vector.
+        $script:roboArgs = $null
+        Mock robocopy -ModuleName NetworkThrottle { $script:roboArgs = $args; $global:LASTEXITCODE = 0; '' }
+        $sec = ConvertTo-SecureString 'p' -AsPlainText -Force
+        $cred = [System.Management.Automation.PSCredential]::new('robo-user', $sec)
+        $warnings = @()
+        $r = Copy-SEBThrottled -Source $script:srcDir -Destination $script:dstDir -MaxBandwidthMbps 10 `
+            -Credential $cred -WarningVariable warnings -WarningAction SilentlyContinue
+        $r.Method | Should -Be 'Robocopy'
+        $warnings | Should -BeNullOrEmpty                                  # not warned: silently ignored
+        # Pester's -Match is case-insensitive; the credential (username or the literal '/credential'
+        # switch robocopy has no concept of) must appear nowhere in the arg vector.
+        ($script:roboArgs -join ' ') | Should -Not -Match 'robo-user'     # credential never forwarded
+        ($script:roboArgs -join ' ') | Should -Not -Match 'credential'
     }
 }
 
@@ -157,5 +206,17 @@ Describe 'Copy-SEBThrottled :: Strategy 3 (Copy-Item fallback, no throttling)' {
     It 'does NOT add -Recurse for a single-file source on the fallback path' {
         Copy-SEBThrottled -Source $script:srcFile -Destination $script:dstDir -WarningAction SilentlyContinue | Out-Null
         Should -Invoke Copy-Item -ModuleName NetworkThrottle -Times 1 -Exactly -ParameterFilter { -not $Recurse }
+    }
+
+    It 'FORWARDS -Credential to Copy-Item (unlike robocopy, this path can honor it for some providers)' {
+        # Counterpart to the robocopy "silently ignored" guard: the Copy-Item branch DOES add
+        # $copyParams['Credential'], so assert the real credential is forwarded (not dropped). This
+        # pins the contrast so neither path's credential behavior can silently regress unnoticed.
+        $sec = ConvertTo-SecureString 'p' -AsPlainText -Force
+        $cred = [System.Management.Automation.PSCredential]::new('copy-user', $sec)
+        Copy-SEBThrottled -Source $script:srcFile -Destination $script:dstDir -Credential $cred -WarningAction SilentlyContinue | Out-Null
+        Should -Invoke Copy-Item -ModuleName NetworkThrottle -Times 1 -Exactly -ParameterFilter {
+            $null -ne $Credential -and $Credential.UserName -eq 'copy-user'
+        }
     }
 }

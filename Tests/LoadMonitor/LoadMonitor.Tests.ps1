@@ -26,11 +26,9 @@ BeforeAll {
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
     Import-Module "$repoRoot/SEBackup.psd1" -Force -DisableNameChecking 3>$null
 
-    # A type-satisfying PSSession that touches no transport (no public ctor -> uninitialized object).
-    function New-FakeSession {
-        [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
-            [System.Management.Automation.Runspaces.PSSession])
-    }
+    # Shared PSSession double (the FormatterServices.GetUninitializedObject([PSSession]) trick,
+    # previously hand-rolled per-suite). New-FakeSession here returns the bare uninitialized session.
+    . "$PSScriptRoot/../_TestHelpers/Test-Doubles.ps1"
 }
 
 Describe 'Get-SEBNodeMetrics' {
@@ -63,6 +61,22 @@ Describe 'Get-SEBNodeMetrics' {
             $script:metrics.CollectedAt | Should -BeOfType [datetime]
         }
 
+        It 'collects in ONE remote call, forwarding the given session and the node CIM script block' {
+            # Folds the old count-only "-Times 1" check into a real shape assertion: the collection
+            # must route through the remoting wrapper EXACTLY once, forwarding the SAME session it was
+            # handed and a script block that actually queries the node's CIM classes (a bare -Times 1
+            # would pass even if it forwarded an empty/wrong block to a different session). The call is
+            # made in-scope here so the invocation count is attributable to this It.
+            $sess = New-FakeSession -Name 'SEBackup-node-metrics'
+            Get-SEBNodeMetrics -Session $sess | Out-Null
+            Should -Invoke Invoke-SEBRemoteCommand -ModuleName LoadMonitor -Times 1 -Exactly -ParameterFilter {
+                $Session.Name -eq 'SEBackup-node-metrics' -and
+                $ScriptBlock.ToString() -match 'Win32_Processor' -and
+                $ScriptBlock.ToString() -match 'Win32_OperatingSystem' -and
+                $ScriptBlock.ToString() -match 'Win32_LogicalDisk'
+            }
+        }
+
         It 'maps the CPU block (average + per-processor array)' {
             $script:metrics.Cpu.AveragePercent | Should -Be 42.5
             $script:metrics.Cpu.Processors | Should -Be @(40, 45)
@@ -80,11 +94,6 @@ Describe 'Get-SEBNodeMetrics' {
             $script:metrics.Disks[0].UsedPercent | Should -Be 75.0
             $script:metrics.Disks[1].DriveLetter | Should -Be 'D:'
             $script:metrics.Disks[1].FreeGB | Should -Be 400.0
-        }
-
-        It 'routes its collection through the remoting wrapper exactly once' {
-            Get-SEBNodeMetrics -Session (New-FakeSession) | Out-Null
-            Should -Invoke Invoke-SEBRemoteCommand -ModuleName LoadMonitor -Times 1 -Exactly
         }
     }
 
@@ -116,9 +125,16 @@ Describe 'Test-SEBNodeLoad' {
         Mock Write-SEBLog {} -ModuleName LoadMonitor
 
         # Drive the two remote CIM calls deterministically. The function issues two separate
-        # Invoke-SEBRemoteCommand calls; we tell them apart by their scriptblock text:
-        #   - CPU block       contains 'Win32_Processor'        -> return a numeric load percent.
-        #   - Memory block    contains 'Win32_OperatingSystem'  -> return Total/Free KB.
+        # Invoke-SEBRemoteCommand calls and there is NO parameter that distinguishes them (both pass
+        # the same -Session; only the inline -ScriptBlock differs), so the only available seam is the
+        # script-block SOURCE TEXT. That coupling is intentionally explicit and somewhat fragile: if
+        # Test-SEBNodeLoad ever renames the CIM class it queries (e.g. drops Win32_Processor /
+        # Win32_OperatingSystem) these arms stop matching and the affected metric reads $null --
+        # which would surface as a failing assertion, not a silent pass. To keep that honest we match
+        # BOTH branches explicitly (rather than treating "anything not memory" as CPU) and THROW on an
+        # unrecognized block, so a newly-added third remote call can't silently inherit the CPU value.
+        #   - CPU block    contains 'Win32_Processor'       -> return a numeric load percent.
+        #   - Memory block contains 'Win32_OperatingSystem' -> return Total/Free KB.
         # Tests set $script:cpuPercent / $script:totalKb / $script:freeKb before calling.
         function Set-NodeLoadMocks {
             Mock Get-SEBPlayerCount -ModuleName LoadMonitor { $script:players }
@@ -130,8 +146,11 @@ Describe 'Test-SEBNodeLoad' {
                         FreePhysicalMemoryKB = $script:freeKb
                     }
                 }
-                else {
+                elseif ($text -match 'Win32_Processor') {
                     [double]$script:cpuPercent
+                }
+                else {
+                    throw "Set-NodeLoadMocks: unrecognized remote scriptblock (neither Win32_Processor nor Win32_OperatingSystem). Update the mock disambiguation to match Test-SEBNodeLoad."
                 }
             }
         }
@@ -187,6 +206,29 @@ Describe 'Test-SEBNodeLoad' {
     It 'blocks on over-threshold memory usage' {
         # 8 GB total, 0.5 GB free => ~94% used, over an 85% cap.
         $script:freeKb = [int](0.5 * 1024 * 1024)
+        $gc = @{ load_awareness = @{ enabled = $true; max_memory_percent = 85 } }
+        $r = Test-SEBNodeLoad -Session (New-FakeSession) -InstanceConfig @{} -GlobalConfig $gc
+        $r.CanProceed | Should -BeFalse
+        ($r.Reasons -join ';') | Should -Match 'Memory usage'
+    }
+
+    It 'treats memory usage exactly AT the threshold as acceptable (boundary: > not >=, and the Round-to-1 edge)' {
+        # 8 GB total (8192 MB). free 1.2 GB -> round(1258291/1024)=1229 MB ->
+        # round((8192-1229)/8192*100,1) = 85.0 exactly. 85.0 > 85 is FALSE, so it must proceed.
+        # This pins BOTH the strict '>' (a '>=' would block here) AND the [math]::Round(...,1) edge.
+        $script:totalKb = 8 * 1024 * 1024
+        $script:freeKb = [int](1.2 * 1024 * 1024)
+        $gc = @{ load_awareness = @{ enabled = $true; max_memory_percent = 85 } }
+        $r = Test-SEBNodeLoad -Session (New-FakeSession) -InstanceConfig @{} -GlobalConfig $gc
+        $r.CanProceed | Should -BeTrue
+        ($r.Reasons -join ';') | Should -Not -Match 'Memory usage'
+    }
+
+    It 'blocks when memory usage is just OVER the threshold (85.1% > 85)' {
+        # free 1.19 GB -> round(1247805/1024)=1219 MB -> round((8192-1219)/8192*100,1) = 85.1.
+        # 85.1 > 85 is TRUE, so the just-over case must block (the companion to the AT-threshold case).
+        $script:totalKb = 8 * 1024 * 1024
+        $script:freeKb = [int](1.19 * 1024 * 1024)
         $gc = @{ load_awareness = @{ enabled = $true; max_memory_percent = 85 } }
         $r = Test-SEBNodeLoad -Session (New-FakeSession) -InstanceConfig @{} -GlobalConfig $gc
         $r.CanProceed | Should -BeFalse

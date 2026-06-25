@@ -45,6 +45,12 @@ BeforeAll {
 
     # A fabricated MSFT_ScheduledTask with controllable State + Triggers (a real CimInstance so it
     # pipes into Get-ScheduledTaskInfo). State is CIM-native; Triggers/TaskName are instance extensions.
+    #
+    # IMPORTANT (state mapping): the CIM-native State is the typed ScheduledState enum, whose
+    # .ToString() ALREADY yields the friendly name ('Ready', 'Running', ...). That makes this double
+    # USELESS for verifying Get-SEBScheduleStatus's own integer-code switch: a broken (or absent)
+    # switch that just did $task.State.ToString() would still produce 'Ready' and the test would pass
+    # vacuously. State-mapping tests therefore use New-FakeTaskRawState below instead.
     function New-FakeTask {
         param(
             [int]$State = 3,                 # 3 = Ready
@@ -53,6 +59,31 @@ BeforeAll {
         )
         New-FakeCim -Class 'MSFT_ScheduledTask' -CimProps @{ State = [uint16]$State } -Extra @{
             TaskName = 'SEBackup-Scheduled'
+            Triggers = @(
+                [PSCustomObject]@{
+                    StartBoundary = $StartBoundary
+                    Repetition    = [PSCustomObject]@{ Interval = $Interval }
+                }
+            )
+        }
+    }
+
+    # A task double whose State is a RAW integer (.ToString() -> '3', '4', ...), so the only way to
+    # obtain the friendly string is Get-SEBScheduleStatus's switch actually mapping the code. We use a
+    # PSCustomObject (not a CimInstance) on purpose: a CimInstance's native State member is the typed
+    # enum and shadows any raw value we try to attach (an ETS override reads back as $null), and it
+    # would stringify to the friendly name -- defeating the test. Get-SEBScheduleStatus never pipes the
+    # task into a strongly-typed cmdlet except Get-ScheduledTaskInfo, which these tests mock, so a
+    # PSCustomObject binds fine. This makes a broken switch arm (or a no-switch .ToString()) FAIL.
+    function New-FakeTaskRawState {
+        param(
+            [int]$State = 3,
+            [string]$Interval = 'PT6H',
+            [string]$StartBoundary = '2026-01-01T02:00:00'
+        )
+        [PSCustomObject]@{
+            TaskName = 'SEBackup-Scheduled'
+            State    = [int]$State          # raw code; switch must transform it to a friendly string
             Triggers = @(
                 [PSCustomObject]@{
                     StartBoundary = $StartBoundary
@@ -212,6 +243,10 @@ Describe 'Get-SEBScheduleStatus' {
     }
 
     It 'maps an existing Ready task with parsed run times and trigger interval' {
+        # This case proves the run-time / interval PARSING and pipes into Get-ScheduledTaskInfo, which
+        # requires a real CimInstance (its -InputObject is a mandatory [CimInstance]; a PSCustomObject
+        # cannot bind, so the GSTI mock would be skipped and the run times would come back $null). The
+        # SWITCH itself is exercised separately, against raw integer codes, in the next test.
         Mock Get-ScheduledTask -ModuleName SchedulerManager { New-FakeTask -State 3 -Interval 'PT6H' }
         Mock Get-ScheduledTaskInfo -ModuleName SchedulerManager {
             [PSCustomObject]@{
@@ -228,12 +263,28 @@ Describe 'Get-SEBScheduleStatus' {
         $s.TriggerInterval | Should -Be ([System.Xml.XmlConvert]::ToTimeSpan('PT6H'))
     }
 
-    It 'maps state code 4 to Running and 1 to Disabled' {
-        Mock Get-ScheduledTaskInfo -ModuleName SchedulerManager { [PSCustomObject]@{ NextRunTime = $null; LastRunTime = $null; LastTaskResult = $null } }
-        Mock Get-ScheduledTask -ModuleName SchedulerManager { New-FakeTask -State 4 }
-        (Get-SEBScheduleStatus 3>$null).State | Should -Be 'Running'
-        Mock Get-ScheduledTask -ModuleName SchedulerManager { New-FakeTask -State 1 }
-        (Get-SEBScheduleStatus 3>$null).State | Should -Be 'Disabled'
+    It 'maps every documented state CODE to its friendly string via the switch (0/1/2/3/4 + default)' {
+        # The REAL exercise of Get-SEBScheduleStatus's integer-code switch. New-FakeTaskRawState carries
+        # State as a RAW integer (.ToString() -> '3', '4', ...), so the friendly string can ONLY come
+        # from the switch mapping the code -- not from the State already stringifying to it (which is
+        # what the CIM-native enum does, vacuously passing a broken/absent switch). Each assertion also
+        # checks the result is NOT the raw code, so a broken arm (or a no-switch .ToString()) FAILS.
+        # A single mock reads $script:stateCode, so there is no per-iteration closure capture to get
+        # wrong. We do not assert run times here (a PSCustomObject can't bind Get-ScheduledTaskInfo);
+        # the previous test owns that.
+        Mock Get-ScheduledTask -ModuleName SchedulerManager { New-FakeTaskRawState -State $script:stateCode }
+
+        $cases = [ordered]@{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' }
+        foreach ($code in $cases.Keys) {
+            $script:stateCode = [int]$code
+            $mapped = (Get-SEBScheduleStatus 3>$null).State
+            $mapped | Should -Be $cases[$code]
+            $mapped | Should -Not -Be "$code"
+        }
+
+        # The 'default' arm: an unmapped code (e.g. 7) falls through to $task.State.ToString() => '7'.
+        $script:stateCode = 7
+        (Get-SEBScheduleStatus 3>$null).State | Should -Be '7'
     }
 }
 
