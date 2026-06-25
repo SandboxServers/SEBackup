@@ -248,11 +248,13 @@ Describe 'Get-SEBRestorePoints discovers the engine-produced backup layout' {
 
     Context 'InstanceName guard rejects traversal but allows valid names (security)' {
         # $InstanceName is concatenated into the backup path (Join-Path $BackupRoot $InstanceName).
-        # The guard mirrors New-SEBLockFile EXACTLY (issue #28 will consolidate them): it rejects
-        # path separators, '..' traversal, rooted paths, wildcards, and invalid filename chars, but
-        # ALLOWS legitimate names containing '.' or spaces (config and New-SEBLockFile accept those).
-        # The guard is a [ValidateScript] that throws, so a rejected value is a terminating
-        # parameter-binding error and the call throws.
+        # The guard delegates to the shared Test-SEBSafeName validator (issue #28 consolidation): it
+        # rejects path separators, '..' traversal, rooted paths, wildcards, and invalid filename chars,
+        # but ALLOWS legitimate names containing '.' or spaces (config and New-SEBLockFile accept
+        # those). The guard runs in the function BODY with the -Throw style (NOT a binding-time
+        # [ValidateScript], which would fail for every value if the Logger module that exports
+        # Test-SEBSafeName were not yet loaded), so a rejected value still raises a terminating error
+        # and the call throws -- exactly the behaviour these assertions depend on.
         It 'throws on a traversal value like ..\evil' {
             { Get-SEBRestorePoints -InstanceName '..\evil' -BackupRoot 'C:\Backups' } | Should -Throw
         }

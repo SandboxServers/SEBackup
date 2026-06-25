@@ -53,6 +53,14 @@ function Get-SEBIntegrityReport {
         [string]$BackupRoot
     )
 
+    # $InstanceName becomes a directory segment ({BackupRoot}\{InstanceName}\integrity_report.json).
+    # Guard it through the shared Test-SEBSafeName validator (issue #28) so a crafted name cannot read
+    # outside the backup root; $null on rejection matches this function's "no report" contract.
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
+        Write-Error "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+        return $null
+    }
+
     $reportPath = Join-Path -Path $BackupRoot -ChildPath $InstanceName |
         Join-Path -ChildPath 'integrity_report.json'
 

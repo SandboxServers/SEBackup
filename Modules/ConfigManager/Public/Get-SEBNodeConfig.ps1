@@ -82,6 +82,14 @@ function Get-SEBNodeConfig {
         return $allConfigs.ToArray()
     }
     else {
+        # NodeName becomes a filename segment ("<NodeName>.toml"). Validate it through the shared
+        # traversal/filename guard so a crafted or mistyped node name cannot escape the nodes
+        # directory or be treated as a wildcard before it is interpolated into the path below.
+        if (-not (Test-SEBSafeName -Name $NodeName)) {
+            Write-Error "Invalid NodeName '$NodeName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+            return $null
+        }
+
         # Load a single node config
         $nodeFilePath = Join-Path -Path $paths.NodesDir -ChildPath "${NodeName}.toml"
 

@@ -53,17 +53,15 @@ function New-SEBLockFile {
         [int]$StaleThresholdHours = 4
     )
 
-    # InstanceName becomes a filename segment ("<InstanceName>.lock"). Reject path separators,
-    # traversal, rooted paths, wildcards, and other invalid filename characters so a crafted or
-    # mistyped instance name cannot escape Data/lockfiles or be treated as a wildcard.
-    if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or
-        [System.IO.Path]::IsPathRooted($InstanceName) -or
-        $InstanceName -match '[\*\?\[\]]' -or
-        $InstanceName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+    # InstanceName becomes a filename segment ("<InstanceName>.lock"). Validate it through the
+    # shared traversal/filename guard (Test-SEBSafeName) so a crafted or mistyped instance name
+    # cannot escape Data/lockfiles or be treated as a wildcard. Use the boolean (return-result)
+    # style here so the caller gets a structured failure object rather than a thrown exception.
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
         return [PSCustomObject]@{
             Acquired        = $false
             LockFilePath    = $null
-            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, wildcards, and invalid filename characters are not allowed."
+            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, rooted/absolute paths, wildcards, and invalid filename characters are not allowed."
             StaleLockBroken = $false
         }
     }

@@ -32,6 +32,7 @@
         'Get-SEBLogEntries'
         'Start-SEBLogContext'
         'Stop-SEBLogContext'
+        'Test-SEBSafeName'
     )
 
     # Cmdlets to export from this module
