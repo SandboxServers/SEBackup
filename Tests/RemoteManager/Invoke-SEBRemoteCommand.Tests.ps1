@@ -2,10 +2,13 @@
 
 # Invoke-SEBRemoteCommand is the resilient wrapper every node-remoting caller is meant to use.
 # This suite pins the correctness behaviours fixed under issue #22:
-#   1. Liveness is the single Test-SEBSessionUsable predicate (State=Opened AND Availability=Available).
-#      A session that is not usable is handled by KIND:
+#   1. The wrapper's EXECUTION gate is Test-SEBSessionUsable (State=Opened AND Availability=Available)
+#      -- "can accept a command NOW". (This is deliberately stricter than Test-SEBSessionAlive, the
+#      "exists / don't destroy" predicate used by New-SEBSession/Test-SEBSessionExists, which counts
+#      a Busy session as alive.) A session that is not usable is handled by KIND:
 #        * State=Opened + Availability=Busy  -> transient; poll briefly, NEVER tear down/reconnect
-#          (it may be running another caller's command). If still busy, throw a "busy" error.
+#          (it may be running another caller's command). If still busy, throw a "busy" error. But if
+#          it goes TERMINAL during the wait, reclassify and reconnect once (do not throw "busy").
 #        * Terminal (State != Opened, or Availability=None) -> reconnect ONCE per invocation.
 #   2. Retry semantics: the DEFAULT RetryCount=1 makes a transient failure run Invoke-Command TWICE;
 #      -RetryCount 0 (used by every non-idempotent/mutating call site) attempts exactly ONCE so a
@@ -107,6 +110,47 @@ Describe 'Invoke-SEBRemoteCommand liveness check (Test-SEBSessionUsable)' {
             Should -Invoke Remove-SEBSession -ModuleName RemoteManager -Times 0 -Exactly
             Should -Invoke New-SEBSession   -ModuleName RemoteManager -Times 0 -Exactly
             Should -Invoke Invoke-Command   -ModuleName RemoteManager -Times 0 -Exactly
+        }
+    }
+
+    Context 'session goes TERMINAL during the busy-wait (finding #4 reclassification)' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock Remove-SEBSession -ModuleName RemoteManager {}
+            Mock New-SEBSession -ModuleName RemoteManager { New-FakeSession -Availability 'Available' -Tag 'reconnected' }
+            Mock Invoke-Command -ModuleName RemoteManager { "ran-on:$($Session.SebTag)" }
+            Mock Start-Sleep -ModuleName RemoteManager {}
+        }
+
+        It 'reconnects (does NOT throw "busy") when the runspace drops to None mid-poll' {
+            # Availability starts Busy for the entry classification (so we genuinely ENTER the busy
+            # branch), then transitions to None after the busy-wait, simulating the in-flight command
+            # breaking the transport while we poll. State stays Opened (the type-wide ETS override),
+            # so the only signal of death is Availability -> None. The first two reads (outer usable
+            # gate + entry $isNone classification) must see Busy; the post-wait re-classification and
+            # the reconnect gate must see None.
+            $session = [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
+                [System.Management.Automation.Runspaces.PSSession])
+            $script:availReads = 0
+            $session | Add-Member -Force -MemberType ScriptProperty -Name Availability -Value {
+                $script:availReads++
+                if ($script:availReads -le 2) {
+                    [System.Management.Automation.Runspaces.RunspaceAvailability]::Busy
+                }
+                else {
+                    [System.Management.Automation.Runspaces.RunspaceAvailability]::None
+                }
+            }
+            $session | Add-Member -Force -MemberType ScriptProperty -Name Name -Value { 'SEBackup-node01' }
+            $session | Add-Member -Force -MemberType ScriptProperty -Name ComputerName -Value { 'node01' }
+            $session | Add-Member -Force -MemberType NoteProperty -Name SebTag -Value 'busy-then-dead'
+
+            # Should NOT throw a busy error; should reconnect and run on the new session.
+            $result = Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 } -BusyWaitSeconds 0
+
+            $result | Should -Be 'ran-on:reconnected'
+            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly
+            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly -ParameterFilter { $NodeName -eq 'node01' }
         }
     }
 

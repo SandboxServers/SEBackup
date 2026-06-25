@@ -16,8 +16,11 @@ function Invoke-SEBRemoteCommand {
           start/stop, deletes, best-effort cleanups) MUST pass -RetryCount 0 so a
           transport failure fails fast into their own rollback/abort handling
           instead of silently re-running.
-        - Session health detection via the single Test-SEBSessionUsable predicate
-          (State=Opened AND Availability=Available). If the session is not usable,
+        - Session health detection via the Test-SEBSessionUsable predicate
+          (State=Opened AND Availability=Available) -- the wrapper's execution gate
+          ("can run a command NOW"). (This is stricter than Test-SEBSessionAlive,
+          the "exists / don't destroy" predicate used by session creation/probing,
+          which counts Busy as alive.) If the session is not usable,
           the wrapper distinguishes two cases:
             * Terminal (State != Opened, or Availability=None): the handle is dead
               or never opened. The wrapper reconnects ONCE per invocation.
@@ -27,7 +30,10 @@ function Invoke-SEBRemoteCommand {
               the wrapper briefly polls for it to return to Available and, if it
               stays busy, throws a clear "session busy" error WITHOUT tearing the
               session down -- it must never kill a runspace running someone else's
-              command.
+              command. If the runspace instead goes TERMINAL during the wait (the
+              in-flight command broke the transport), the wrapper re-classifies it
+              as terminal and falls through to the one-shot reconnect rather than
+              misreporting a now-dead handle as "busy".
         - Reconnect that preserves the connection identity and ownership:
             1. The dead session's real target (ComputerName, i.e. the pinned
                hostname/IP) is captured BEFORE removal and passed back through
@@ -88,9 +94,13 @@ function Invoke-SEBRemoteCommand {
 
     .PARAMETER BusyWaitSeconds
         How long to poll for a State=Opened but Availability=Busy session to
-        return to Available before giving up with a "busy" error. Default 10.
+        return to Available before giving up with a "busy" error. Default 30.
         A busy session is never reconnected or torn down (it may be running
-        another caller's command); it is only waited on.
+        another caller's command); it is only waited on. The default is 30s
+        rather than a few seconds because the per-node session is shared and
+        legitimate concurrent ops (compression/hashing/robocopy on large worlds)
+        routinely run for minutes; a session that goes terminal during the wait
+        is reconnected instead, so waiting longer only affects the truly-busy case.
 
     .EXAMPLE
         $session = New-SEBSession -NodeName "GameServer01"
@@ -137,7 +147,12 @@ function Invoke-SEBRemoteCommand {
 
         [Parameter()]
         [ValidateRange(0, 120)]
-        [int]$BusyWaitSeconds = 10
+        # Default 30s, not 10s: the per-node session is a SHARED cache entry, and legitimate
+        # concurrent holders (multiple Torch instances per node) run minutes-long
+        # compression/hashing/robocopy. A short poll would make a colliding caller throw 'busy'
+        # while a normal long op is still in flight; 30s tolerates the common case while still
+        # bounding the synchronous wait. Throwing is safe (no teardown), so this is tuning.
+        [int]$BusyWaitSeconds = 30
     )
 
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
@@ -150,8 +165,9 @@ function Invoke-SEBRemoteCommand {
     while ($attempt -lt $maxAttempts) {
         $attempt++
 
-        # Check session health before executing, using the single Test-SEBSessionUsable
-        # predicate (State=Opened AND Availability=Available). A session that is not usable
+        # Check session health before executing, using the Test-SEBSessionUsable
+        # predicate (State=Opened AND Availability=Available) -- the wrapper's execution gate.
+        # (Session creation/probing use the broader Test-SEBSessionAlive instead.) A session that is not usable
         # falls into one of two distinct buckets that must be handled DIFFERENTLY:
         #   * Busy-but-Opened: the runspace is mid-command (commonly another caller sharing
         #     this cached per-node session). This is transient -- wait briefly, do NOT tear
@@ -171,12 +187,29 @@ function Invoke-SEBRemoteCommand {
                 while ((Get-Date) -lt $busyDeadline -and -not (Test-SEBSessionUsable -Session $Session)) {
                     Start-Sleep -Milliseconds 500
                 }
-                if (-not (Test-SEBSessionUsable -Session $Session)) {
-                    throw "Session to '$nodeName' is busy (State=$($Session.State), Availability=$($Session.Availability)) and did not become available. Refusing to reconnect a busy session (it may be running another operation)."
+                if (Test-SEBSessionUsable -Session $Session) {
+                    # Became Available -- fall through and execute on the same session.
                 }
-                # Became Available -- fall through and execute on the same session.
+                else {
+                    # Still not usable after the wait. Re-classify: the runspace may have gone
+                    # TERMINAL (State left Opened, or Availability dropped to None) while we polled
+                    # -- e.g. the in-flight command finished by breaking the transport. In that case
+                    # it is no longer "busy with someone else's work"; it is dead, so fall through to
+                    # the one-shot reconnect instead of misreporting it as busy. Only throw the busy
+                    # error if it is STILL genuinely busy (Opened and not None).
+                    $isOpened = $Session.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened
+                    $isNone = $Session.Availability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::None
+                    if ($isOpened -and -not $isNone) {
+                        throw "Session to '$nodeName' is busy (State=$($Session.State), Availability=$($Session.Availability)) and did not become available. Refusing to reconnect a busy session (it may be running another operation)."
+                    }
+                    # Otherwise it went terminal during the wait -- handle it as terminal below.
+                }
             }
-            elseif (-not $reconnected) {
+
+            # NB: re-test usability here rather than chaining elseif on the entry-time state, so a
+            # session that transitioned Busy -> terminal during the busy-wait still reaches the
+            # reconnect path (instead of the stale 'busy' throw above).
+            if (-not (Test-SEBSessionUsable -Session $Session) -and -not $reconnected) {
                 if ($hasLogger) {
                     Write-SEBLog -Message "Session to '$nodeName' is not usable (State=$($Session.State), Availability=$($Session.Availability)). Attempting reconnection." -Level WARN
                 }
@@ -234,7 +267,10 @@ function Invoke-SEBRemoteCommand {
                     throw "Session to '$nodeName' is broken and reconnection failed: $_"
                 }
             }
-            else {
+            elseif (-not (Test-SEBSessionUsable -Session $Session)) {
+                # Still not usable AND we already reconnected once this invocation -- give up.
+                # (A session that became Available during the busy-wait is usable here and falls
+                # through to execute; this branch fires only for the terminal-after-reconnect case.)
                 throw "Session to '$nodeName' is not usable (State=$($Session.State), Availability=$($Session.Availability)) after reconnection attempt. Cannot execute command."
             }
         }

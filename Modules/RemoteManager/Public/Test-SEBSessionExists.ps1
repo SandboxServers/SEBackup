@@ -14,11 +14,19 @@ function Test-SEBSessionExists {
         tear it down (it belongs to whoever created it). If no session exists,
         New-SEBSession creates one and the caller owns it.
 
-        The "usable" determination uses the single shared Test-SEBSessionUsable
-        predicate (present AND State=Opened AND Availability=Available) -- the same
-        one New-SEBSession and Invoke-SEBRemoteCommand use. A cached-but-broken/
-        closed/busy session returns $false, because New-SEBSession would discard and
-        recreate it (making the caller the owner of the new one).
+        The "already exists" determination uses Test-SEBSessionAlive (present AND
+        State=Opened AND Availability != None) -- the SAME predicate New-SEBSession
+        uses to decide cache reuse, so the two agree on what counts as a
+        pre-existing session. A session that is Busy (Availability=Busy, because
+        another caller is mid-command on the shared per-node handle) is ALIVE and
+        returns $true: New-SEBSession would reuse it, so the probing caller must
+        treat it as pre-existing and NOT take ownership / tear it down. Only a
+        genuinely dead/never-opened entry (which New-SEBSession would discard and
+        recreate) returns $false.
+
+        Note this is intentionally broader than Test-SEBSessionUsable ("can accept
+        a command NOW", State=Opened AND Availability=Available), which is the
+        wrapper's execution gate, not an ownership/existence probe.
 
     .PARAMETER NodeName
         The name of the node to check for a cached session. This is the same key
@@ -47,5 +55,5 @@ function Test-SEBSessionExists {
         return $false
     }
 
-    return (Test-SEBSessionUsable -Session $script:SEBSessions[$NodeName])
+    return (Test-SEBSessionAlive -Session $script:SEBSessions[$NodeName])
 }

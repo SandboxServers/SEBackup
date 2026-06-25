@@ -8,11 +8,20 @@ function New-SEBSession {
         node using stored DPAPI-encrypted credentials from the CredentialManager
         module. Sessions are cached in a module-scoped hashtable keyed by NodeName.
 
-        If a cached session already exists for the node and is still in an Opened
-        state, the existing session is returned instead of creating a new one.
+        If a cached session already exists for the node and is still ALIVE
+        (State=Opened and Availability != None, per Test-SEBSessionAlive), the
+        existing session is returned instead of creating a new one. A session that
+        is Busy because another caller is mid-command on the shared per-node handle
+        still counts as alive and is reused -- it is NOT torn down.
 
-        If a cached session exists but is no longer open (Broken, Closed, or
-        Disconnected), it is removed and a fresh session is created.
+        If a cached session exists but is dead (Broken, Closed, Disconnected, or
+        otherwise not in the Opened state), it is removed and a fresh session is
+        created.
+
+        When a NodeConfig-less (re)create is required, the ComputerName falls back
+        to the host this node last successfully connected to (remembered in a
+        module-scoped map), NOT the bare friendly alias, so a reconnect after a
+        cache miss/death still targets the pinned hostname/IP.
 
         The session is configured with appropriate timeouts for long-running
         backup operations:
@@ -29,6 +38,12 @@ function New-SEBSession {
         'hostname' key is used as the ComputerName instead of NodeName. This
         allows the NodeName to be a friendly alias while connecting to the
         actual hostname or IP address.
+
+        If omitted, the ComputerName resolves to the host this node last
+        successfully connected to (remembered across calls), or NodeName if the
+        node has never been connected before. Callers that already hold the node
+        config should keep passing it; the remembered-host fallback is the safety
+        net for refresh/reconnect sites that do not have it.
 
         Expected keys:
         - hostname: The actual hostname or IP address to connect to.
@@ -63,28 +78,43 @@ function New-SEBSession {
         [hashtable]$NodeConfig
     )
 
-    # Check for a cached session that is still usable. Liveness is decided by the
-    # single shared predicate Test-SEBSessionUsable (State=Opened AND
-    # Availability=Available) -- the same predicate Test-SEBSessionExists and
-    # Invoke-SEBRemoteCommand use, so there is exactly one definition of "usable".
+    # Check for a cached session that is still ALIVE. Reuse is decided by
+    # Test-SEBSessionAlive (State=Opened AND Availability != None), NOT by
+    # Test-SEBSessionUsable: a cached session that is Busy because ANOTHER caller is
+    # mid-command on the shared per-node handle is still alive and must NOT be torn
+    # down and rebuilt (that would abort the in-flight command and re-key the cache
+    # under a fresh connection). We only remove + recreate when the entry is genuinely
+    # dead/never-opened. The narrower "can accept a command NOW" question
+    # (Test-SEBSessionUsable) is the wrapper's concern, not session creation's.
     if ($script:SEBSessions.ContainsKey($NodeName)) {
         $existingSession = $script:SEBSessions[$NodeName]
-        if (Test-SEBSessionUsable -Session $existingSession) {
-            Write-Verbose "Returning cached session for node '$NodeName' (ID: $($existingSession.Id))"
+        if (Test-SEBSessionAlive -Session $existingSession) {
+            Write-Verbose "Returning cached session for node '$NodeName' (ID: $($existingSession.Id), Availability=$($existingSession.Availability))"
             return $existingSession
         }
         else {
-            Write-Verbose "Cached session for node '$NodeName' is not usable (State=$($existingSession.State), Availability=$($existingSession.Availability)). Removing and creating a new session."
+            Write-Verbose "Cached session for node '$NodeName' is not alive (State=$($existingSession.State), Availability=$($existingSession.Availability)). Removing and creating a new session."
             try { Remove-PSSession -Session $existingSession -ErrorAction SilentlyContinue } catch {}
             $script:SEBSessions.Remove($NodeName)
         }
     }
 
-    # Determine the target computer name
+    # Determine the target computer name. Precedence:
+    #   1. -NodeConfig.hostname (the caller passed the pinned host explicitly).
+    #   2. The host this node last successfully connected to ($script:SEBSessionHosts) --
+    #      the safety net so a NodeConfig-less (re)create never silently reconnects to the
+    #      bare friendly alias. alias != hostname is the documented standard deployment;
+    #      connecting to the alias could fail to resolve or, worse, resolve to a DIFFERENT
+    #      machine and present this node's stored credential there.
+    #   3. The NodeName itself (no NodeConfig, and this node was never connected before).
     $computerName = $NodeName
     if ($NodeConfig -and $NodeConfig.ContainsKey('hostname')) {
         $computerName = $NodeConfig['hostname']
         Write-Verbose "Using hostname '$computerName' from node configuration for '$NodeName'."
+    }
+    elseif ($script:SEBSessionHosts.ContainsKey($NodeName)) {
+        $computerName = $script:SEBSessionHosts[$NodeName]
+        Write-Verbose "No NodeConfig supplied; reusing pinned host '$computerName' for '$NodeName' from the session-host map."
     }
 
     # Retrieve stored credentials
@@ -110,6 +140,9 @@ function New-SEBSession {
             -ErrorAction   Stop
 
         $script:SEBSessions[$NodeName] = $session
+        # Pin the resolved connection target so a later NodeConfig-less (re)create for this
+        # node reuses the real host instead of the bare alias (see the precedence note above).
+        $script:SEBSessionHosts[$NodeName] = $computerName
         Write-Verbose "PSSession created for node '$NodeName' (ID: $($session.Id), ComputerName: $computerName)"
 
         return $session

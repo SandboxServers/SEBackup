@@ -1,18 +1,25 @@
 function Test-SEBSessionUsable {
     <#
     .SYNOPSIS
-        The single liveness predicate for a SEBackup PSSession.
+        "Can this SEBackup PSSession accept a command RIGHT NOW" predicate.
 
     .DESCRIPTION
-        Returns $true only when a session is ready to accept a new command RIGHT
-        NOW: it is established (State=Opened) AND its runspace is idle
+        Returns $true only when a session is ready to accept a new top-level
+        command RIGHT NOW: it is established (State=Opened) AND its runspace is idle
         (Availability=Available).
 
-        This is the ONE source of truth for "is this session usable" and is
-        called from New-SEBSession (cache hit), Test-SEBSessionExists (ownership
-        probe), and Invoke-SEBRemoteCommand (pre-execution health gate). Keeping
-        the predicate in one place removes the drift that used to exist between
-        three hand-copied conditions.
+        This is the "usable now" half of the session-liveness split. It is the ONE
+        source of truth for the WRAPPER's execution gate (Invoke-SEBRemoteCommand):
+        a session that is not usable is either Busy-but-Opened (wait briefly, never
+        tear down) or terminal (reconnect once). Keeping this gate in one place
+        removes the drift that used to exist between hand-copied conditions.
+
+        Do NOT use this predicate to decide whether a cached session "exists" or may
+        be reused -- that is the ALIVE concern (Test-SEBSessionAlive: State=Opened
+        AND Availability != None), which counts a Busy session as alive so a shared
+        in-use per-node session is not destroyed and re-keyed. New-SEBSession (cache
+        reuse) and Test-SEBSessionExists (ownership probe) use Test-SEBSessionAlive;
+        only Invoke-SEBRemoteCommand uses this stricter predicate.
 
         Why both State AND Availability (confirmed against the .NET docs for
         System.Management.Automation.Runspaces):

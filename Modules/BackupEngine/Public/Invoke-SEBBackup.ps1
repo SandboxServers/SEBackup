@@ -319,8 +319,12 @@ function Invoke-SEBBackup {
                 # throwing Invoke-Command (no -SessionRef write-back). Refresh from the cache
                 # immediately before it so it never receives a handle a prior wrapped step
                 # reconnected away from: a cache HIT returns the same live session; after any
-                # reconnect the cache already holds the live handle.
-                $session = New-SEBSession -NodeName $NodeName
+                # reconnect the cache already holds the live handle. NON-THROWING + NodeConfig:
+                # pass the pinned hostname so a dead-cache rebuild targets the real host (not the
+                # bare alias), and fall back to the existing handle if the refresh itself throws so
+                # a transient refresh failure does not abort the backup before this best-effort read.
+                try { $session = New-SEBSession -NodeName $NodeName -NodeConfig @{ hostname = $nodeHostname } }
+                catch { Write-Verbose "Cache refresh before compression-engine probe failed; using existing session. $_" }
                 $engineInfo = Get-SEBCompressionEngine -Session $session
                 $resolvedEngine = if ($engineInfo -is [string]) { $engineInfo } else { $engineInfo.Engine }
                 if ([string]::IsNullOrWhiteSpace($resolvedEngine)) { $resolvedEngine = 'dotnet' }
@@ -388,8 +392,12 @@ function Invoke-SEBBackup {
         # New-SEBManifest takes the session BY VALUE and reconnects (if needed) only into the
         # module cache, not back into this $session. Refresh from the cache immediately before
         # it (and again before the compression call below) so the orchestrator's handle tracks
-        # the live session a long manifest scan may have reconnected.
-        $session = New-SEBSession -NodeName $NodeName
+        # the live session a long manifest scan may have reconnected. NON-THROWING + NodeConfig:
+        # pin the real host on a dead-cache rebuild, and fall back to the existing handle on a
+        # refresh failure so the refresh cannot abort the backup (New-SEBManifest's own failure,
+        # if the handle really is dead, is surfaced and handled by the $null check below).
+        try { $session = New-SEBSession -NodeName $NodeName -NodeConfig @{ hostname = $nodeHostname } }
+        catch { Write-Verbose "Cache refresh before manifest generation failed; using existing session. $_" }
         $manifestParams = @{
             SourcePath = $nodeStagingDir
             Session    = $session
@@ -452,8 +460,12 @@ function Invoke-SEBBackup {
         # Compress-SEBArchive's remote path is a raw throwing Invoke-Command that takes the
         # session BY VALUE. Refresh from the cache immediately before it so a session death
         # during the preceding manifest/prune steps (which heals into the cache) does not leave
-        # this data-path call holding a stale handle and abort the backup.
-        $session = New-SEBSession -NodeName $NodeName
+        # this data-path call holding a stale handle and abort the backup. NON-THROWING +
+        # NodeConfig: pin the real host on a dead-cache rebuild, and fall back to the existing
+        # handle on a refresh failure so the refresh itself cannot abort the backup before the
+        # compression step (which surfaces its own error if the handle is truly dead).
+        try { $session = New-SEBSession -NodeName $NodeName -NodeConfig @{ hostname = $nodeHostname } }
+        catch { Write-Verbose "Cache refresh before compression failed; using existing session. $_" }
         Compress-SEBArchive `
             -SourcePath       $nodeStagingDir `
             -DestinationPath  $nodeArchivePath `
