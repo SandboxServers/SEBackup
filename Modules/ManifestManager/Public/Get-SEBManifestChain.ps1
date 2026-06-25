@@ -51,6 +51,12 @@ function Get-SEBManifestChain {
         [string]$BackupRoot
     )
 
+    # $InstanceName becomes a directory segment ({BackupRoot}\{InstanceName}\manifests). Guard it
+    # through the shared Test-SEBSafeName validator (issue #28) so a crafted name cannot walk the chain
+    # outside the backup root. This function's error contract is to throw on an unusable chain, so use
+    # the -Throw style for a consistent terminating error.
+    Test-SEBSafeName -Name $InstanceName -Throw | Out-Null
+
     $manifestDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName | Join-Path -ChildPath 'manifests'
 
     if (-not (Test-Path -Path $manifestDir -PathType Container)) {

@@ -38,20 +38,29 @@ function Get-SEBRestorePoints {
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNullOrEmpty()]
-        # $InstanceName is concatenated into a filesystem path (Join-Path $BackupRoot $InstanceName).
-        # Without this guard, a value like '..\..\x' would escape $BackupRoot and let discovery walk
-        # arbitrary directories. Validation is delegated to the shared Test-SEBSafeName (issue #28)
-        # so every name->path boundary stays consistent: it rejects path separators, '..' traversal,
-        # rooted paths, wildcard metacharacters, and any invalid filename characters -- but ALLOWS
-        # legitimate names that contain '.', spaces, etc. The -Throw style makes a rejected value a
-        # terminating parameter-binding error, preserving this call site's original throwing
-        # behaviour.
-        [ValidateScript({ Test-SEBSafeName -Name $_ -Throw })]
         [string]$InstanceName,
 
         [Parameter()]
         [string]$BackupRoot
     )
+
+    # $InstanceName is concatenated into a filesystem path (Join-Path $BackupRoot $InstanceName).
+    # Without this guard, a value like '..\..\x' would escape $BackupRoot and let discovery walk
+    # arbitrary directories. Validation is delegated to the shared Test-SEBSafeName (issue #28) so
+    # every name->path boundary stays consistent: it rejects path separators, '..' traversal, rooted
+    # paths, wildcard metacharacters, and any invalid filename characters -- but ALLOWS legitimate
+    # names that contain '.', spaces, etc.
+    #
+    # This guard runs in the function BODY rather than a binding-time [ValidateScript]: Test-SEBSafeName
+    # is exported by the Logger module, which the root SEBackup.psm1 loads FIRST (before RestoreEngine).
+    # A [ValidateScript({ Test-SEBSafeName ... })] is evaluated during parameter binding, so if Logger
+    # were ever not yet loaded the validation would fail for EVERY value -- even a valid name. Calling
+    # it in the body (matching the body-call style of New-SEBLockFile and Test-SEBChainIntegrity) keeps
+    # a valid name from ever failing at binding and throws only on an actually-unsafe value, preserving
+    # this call site's original throwing behaviour. The Logger-first load order is the documented
+    # dependency these path-loaded sibling modules rely on (RequiredModules-by-name does not resolve
+    # for modules that are imported by path and are not on PSModulePath).
+    Test-SEBSafeName -Name $InstanceName -Throw | Out-Null
 
     # Resolve the backup root
     if ([string]::IsNullOrWhiteSpace($BackupRoot)) {

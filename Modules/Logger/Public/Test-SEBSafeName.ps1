@@ -12,8 +12,12 @@ function Test-SEBSafeName {
         intended directory (path traversal / zip-slip) or be treated as a glob that matches an
         unintended file.
 
-        This is the single, canonical guard that every name->path boundary in the codebase
-        shares. It rejects a name when ANY of the following is true:
+        This is the single, canonical validator that name->path boundaries in the codebase share so
+        the rejection rules stay defined in one place (used by, among others, Get-SEBInstanceConfig,
+        Get-SEBNodeConfig, New-SEBLockFile, Get-SEBRestorePoints, Get-SEBBackupHistory,
+        Get-SEBLatestManifest, Get-SEBManifestChain, Add-SEBMetric, Test-SEBChainIntegrity,
+        Resolve-SEBChainArchivePath, and the integrity-report read/write pair). It rejects a name
+        when ANY of the following is true:
 
         - It contains a path separator: '\' or '/'.
         - It contains the traversal sequence '..'.

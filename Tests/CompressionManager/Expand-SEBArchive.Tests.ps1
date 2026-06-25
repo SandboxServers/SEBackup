@@ -51,6 +51,29 @@ BeforeAll {
             $fs.Dispose()
         }
     }
+
+    # Verbatim mirror of the 7-Zip pre-extraction FAIL-CLOSED accounting in
+    # Modules/CompressionManager/Public/Expand-SEBArchive.ps1. Returns $true when extraction WOULD be
+    # refused fail-closed (the '-slt' parse never reached the entries section -- the '----------'
+    # separator was absent -- yet the listing still described file content), and $false when the
+    # listing was well-formed enough for the real loop to have validated entries (or is a genuinely
+    # empty archive with nothing to extract). If the in-function logic changes, update this mirror.
+    function Test-SevenZipListingFailsClosed {
+        param([string[]]$ListOutput)
+        $inEntries = $false
+        $pathLineCount = 0
+        $sawEntryMetadata = $false
+        foreach ($line in $ListOutput) {
+            $lineStr = $line.ToString()
+            if ($lineStr -match '^Path = (.+)$') { $pathLineCount++ }
+            elseif ($lineStr -match '^(Size|Folder) = ') { $sawEntryMetadata = $true }
+            if (-not $inEntries) {
+                if ($lineStr -match '^-{5,}\s*$') { $inEntries = $true }
+                continue
+            }
+        }
+        return (-not $inEntries -and ($pathLineCount -gt 1 -or $sawEntryMetadata))
+    }
 }
 
 Describe 'Expand-SEBArchive zip-slip containment' {
@@ -125,6 +148,61 @@ Describe 'Expand-SEBArchive zip-slip containment' {
 
             Test-Path -LiteralPath (Join-Path $script:dest 'good.txt') | Should -BeTrue
             Get-Content -LiteralPath (Join-Path $script:dest 'good.txt') -Raw | Should -Match 'hello-7z'
+        }
+    }
+
+    Context '7-Zip listing fail-closed rule (issue #28)' {
+        # The original 7z guard only inspected entries AFTER a '^-{5,}' separator line. If 7-Zip ever
+        # emitted an '-slt' listing without that separator, $inEntries stayed false, NO entry was
+        # checked, and a traversal archive would be handed straight to '7z x'. The fix makes that case
+        # FAIL CLOSED. 7-Zip's binary path is resolved inside the function's scriptblock (Program Files
+        # first) and a real 7z.exe is normally installed, so '& $sevenZip' cannot be intercepted to
+        # inject a separator-less listing without swapping the binary; the fail-closed PREDICATE is
+        # therefore pinned directly (mirror function above).
+        It 'does NOT fail closed for a well-formed non-empty listing (separator present)' {
+            # Header 'Path =', a separator, then a real entry block: the entries section IS reached,
+            # so the real loop validates each entry path -- no fail-closed abort.
+            $listing = @(
+                'Path = C:\backups\world.7z'
+                'Type = 7z'
+                ''
+                '----------'
+                'Path = Sandbox.sbc'
+                'Size = 123'
+                'Folder = -'
+            )
+            Test-SevenZipListingFailsClosed -ListOutput $listing | Should -BeFalse
+        }
+
+        It 'FAILS CLOSED for a non-empty listing that never delimits its entry section (no separator)' {
+            # An entry 'Path = ..\evil.txt' appears but, with no separator, the old code would have
+            # validated NOTHING and extracted. The fix refuses it.
+            $listing = @(
+                'Path = C:\backups\world.7z'
+                'Type = 7z'
+                'Path = ..\evil.txt'
+                'Size = 5'
+            )
+            Test-SevenZipListingFailsClosed -ListOutput $listing | Should -BeTrue
+        }
+
+        It 'FAILS CLOSED when only per-entry metadata (Size/Folder) leaks without a separator' {
+            $listing = @(
+                'Path = C:\backups\world.7z'
+                'Size = 999'
+            )
+            Test-SevenZipListingFailsClosed -ListOutput $listing | Should -BeTrue
+        }
+
+        It 'does NOT fail closed for an empty archive (header-only, nothing to extract)' {
+            # Only the archive's own header 'Path =' and no per-entry metadata: there is nothing to
+            # extract that could escape, so an empty archive must not be penalised.
+            $listing = @(
+                'Path = C:\backups\empty.7z'
+                'Type = 7z'
+                'Physical Size = 22'
+            )
+            Test-SevenZipListingFailsClosed -ListOutput $listing | Should -BeFalse
         }
     }
 }

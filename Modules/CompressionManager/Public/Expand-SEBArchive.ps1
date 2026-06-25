@@ -138,8 +138,18 @@ function Expand-SEBArchive {
             # own absolute path is never mistaken for an escaping entry.
             $inEntries = $false
             $offending = $null
+            # Fail-closed accounting: if 7-Zip ever emits a listing WITHOUT the '----------' separator,
+            # $inEntries would stay false and NO entry path would be checked -- silently handing a
+            # traversal archive to '7z x'. Track evidence that the listing described actual file
+            # content (a 'Path =' line beyond the archive's own header line, or per-entry 'Size ='/
+            # 'Folder =' metadata) so a separator-less listing of a non-empty archive can be detected
+            # and aborted below, rather than allowed through.
+            $pathLineCount = 0
+            $sawEntryMetadata = $false
             foreach ($line in $listOutput) {
                 $lineStr = $line.ToString()
+                if ($lineStr -match '^Path = (.+)$') { $pathLineCount++ }
+                elseif ($lineStr -match '^(Size|Folder) = ') { $sawEntryMetadata = $true }
                 if (-not $inEntries) {
                     if ($lineStr -match '^-{5,}\s*$') { $inEntries = $true }
                     continue
@@ -163,6 +173,20 @@ function Expand-SEBArchive {
                     Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 throw "Refusing to extract '$Archive': entry '$offending' would escape the destination '$Destination' (zip-slip/path traversal)."
+            }
+
+            # Fail closed on a malformed listing: the parse completed but never reached the entries
+            # section ('----------' separator never seen), yet the listing clearly described file
+            # content (an entry 'Path =' beyond the archive's own header line, or per-entry Size/Folder
+            # metadata). In that case NO entry was containment-checked, so refuse to extract rather
+            # than trust an unverified archive -- mirroring the LASTEXITCODE!=0 abort above. An empty
+            # archive (only the header 'Path =', no entry metadata) is NOT penalised: there is nothing
+            # to extract that could escape.
+            if (-not $inEntries -and ($pathLineCount -gt 1 -or $sawEntryMetadata)) {
+                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
+                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                throw "Refusing to extract '$Archive': 7-Zip listing did not delimit its entry section, so archive entries could not be verified for path traversal before extraction."
             }
 
             $args7z = @('x', $Archive, "-o$Destination", '-y')
