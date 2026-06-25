@@ -4,15 +4,24 @@ function Get-SEBCredential {
         Retrieves a stored PSCredential for a remote SEBackup node.
 
     .DESCRIPTION
-        Reads and deserializes a DPAPI-encrypted PSCredential from the credential
-        file at Credentials/{NodeName}.cred.xml using Import-Clixml.
+        Loads the credential for a node from the protected "*.cred" store
+        introduced for issue #27, decrypting the password with LocalMachine-scope
+        DPAPI (the same scope and per-machine entropy used to save it) and
+        rebuilding a PSCredential. Because the protection is machine-bound rather
+        than user-bound, this succeeds for any process on the SAME C&C host --
+        including an unattended S4U scheduled task -- which is what makes
+        unattended authentication work.
 
-        If the credential file does not exist, an error is thrown with guidance
-        to run Setup-Node.ps1 or Save-SEBCredential to store credentials first.
+        Backward compatibility / migration: if no new "{NodeName}.cred" file
+        exists but a legacy Export-Clixml "{NodeName}.cred.xml" does, this function
+        transparently migrates it. If the legacy file is readable by the current
+        user, it is re-saved in the new protected format (and the old file
+        removed) and the credential is returned. If it is NOT readable (e.g. it
+        was saved by a different user), a clear "re-save required" error is thrown
+        and the legacy file is left untouched.
 
-        Because DPAPI encryption is tied to the current Windows user account and
-        machine, the credential can only be read by the same user on the same
-        machine that created it.
+        Throws if no credential exists, or if the stored credential cannot be
+        decrypted on this machine.
 
     .PARAMETER NodeName
         The name of the remote node whose credential should be retrieved.
@@ -27,7 +36,7 @@ function Get-SEBCredential {
 
     .OUTPUTS
         System.Management.Automation.PSCredential
-        The deserialized PSCredential object for the specified node.
+        The PSCredential object for the specified node.
     #>
     [CmdletBinding()]
     [OutputType([PSCredential])]
@@ -39,18 +48,47 @@ function Get-SEBCredential {
 
     $credentialFile = Resolve-CredentialPath -NodeName $NodeName
 
-    if (-not (Test-Path -Path $credentialFile)) {
-        throw "No credential found for node '$NodeName'. Expected file: $credentialFile`n" +
-              "Run Setup-Node.ps1 or Save-SEBCredential -NodeName '$NodeName' to store credentials first."
-    }
+    if (Test-Path -LiteralPath $credentialFile) {
+        # New protected format.
+        try {
+            $raw = Get-Content -LiteralPath $credentialFile -Raw -ErrorAction Stop
+            $envelope = $raw | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message "Failed to read/parse credential file '$credentialFile' for node '$NodeName': $_"
+            throw "Failed to read credential for node '$NodeName' from '$credentialFile'. The file may be corrupted: $_"
+        }
 
-    try {
-        $credential = Import-Clixml -Path $credentialFile
+        $credential = ConvertFrom-SEBProtectedCredential -Envelope $envelope
+        if ($null -eq $credential) {
+            throw "Failed to decrypt credential for node '$NodeName' from '$credentialFile'. " +
+                  "It may have been created on a different machine or under a rotated key/entropy version. " +
+                  "Re-save it on THIS host with Save-SEBCredential -NodeName '$NodeName'."
+        }
+
         Write-Verbose "Credential loaded for node '$NodeName' (User: $($credential.UserName))"
         return $credential
     }
-    catch {
-        throw "Failed to read credential for node '$NodeName' from '$credentialFile'. " +
-              "The file may be corrupted or was encrypted by a different user/machine: $_"
+
+    # No new-format file. Attempt transparent migration from a legacy Clixml file.
+    $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
+    if (Test-Path -LiteralPath $legacyFile) {
+        $migration = Convert-SEBLegacyCredential -NodeName $NodeName -SaveAction {
+            param([PSCredential]$cred)
+            Write-SEBProtectedCredentialFile -NodeName $NodeName -Credential $cred
+        }
+
+        if ($migration.Status -eq 'Migrated' -and $migration.Credential) {
+            Write-Verbose "Credential for node '$NodeName' migrated from legacy format and loaded (User: $($migration.Credential.UserName))"
+            return $migration.Credential
+        }
+
+        # Legacy file exists but was not readable/migratable by this account.
+        throw "A legacy credential file exists for node '$NodeName' but could not be read by the current account " +
+              "(it was likely saved by a different user). Re-save it on THIS host with " +
+              "Save-SEBCredential -NodeName '$NodeName' so it is stored in the machine-readable protected format."
     }
+
+    throw "No credential found for node '$NodeName'. Expected file: $credentialFile`n" +
+          "Run Setup-Node.ps1 or Save-SEBCredential -NodeName '$NodeName' to store credentials first."
 }

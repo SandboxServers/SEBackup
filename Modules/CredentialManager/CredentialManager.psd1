@@ -20,7 +20,7 @@
     Copyright         = '(c) 2026 SEBackup Project. All rights reserved.'
 
     # Description of the functionality provided by this module
-    Description       = 'DPAPI-encrypted credential storage module for the SEBackup Space Engineers Torch Server Backup & Restore System. Provides secure save, retrieve, test, and remove operations for per-node PSCredential objects.'
+    Description       = 'LocalMachine-DPAPI credential storage module for the SEBackup Space Engineers Torch Server Backup & Restore System. Protects per-node PSCredential secrets with machine-scoped DPAPI plus per-machine entropy and a restrictive ACL, so unattended (S4U / run-whether-logged-on-or-not) scheduled tasks on the same C&C host can decrypt them. Provides save, retrieve, test, remove, and rotation (Update) operations with transparent migration from the legacy Export-Clixml store.'
 
     # Minimum version of PowerShell required by this module
     PowerShellVersion = '7.0'
@@ -31,6 +31,7 @@
         'Get-SEBCredential'
         'Remove-SEBCredential'
         'Test-SEBCredential'
+        'Update-SEBCredential'
     )
 
     # Cmdlets to export from this module
@@ -46,7 +47,7 @@
     PrivateData       = @{
         PSData = @{
             # Tags applied to this module for discoverability
-            Tags       = @('Credentials', 'SEBackup', 'SpaceEngineers', 'Torch', 'DPAPI')
+            Tags       = @('Credentials', 'SEBackup', 'SpaceEngineers', 'Torch', 'DPAPI', 'LocalMachine', 'Unattended', 'Rotation')
 
             # License URI for this module
             LicenseUri = ''

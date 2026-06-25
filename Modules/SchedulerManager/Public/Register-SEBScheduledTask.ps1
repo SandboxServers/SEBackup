@@ -114,19 +114,20 @@ function Register-SEBScheduledTask {
             -WorkingDirectory $projectRoot
 
         # Build the principal: current user, highest privileges, run whether logged on or not.
-        # NOTE: S4U logon does not load the user's password/profile, so DPAPI-encrypted
-        # credentials (Save-SEBCredential) saved interactively may fail to decrypt under the
-        # task even though they decrypt fine in an interactive session. Warn the operator.
+        # S4U logon loads no user profile and has "no access to encrypted files" (per Microsoft),
+        # which historically broke CurrentUser-DPAPI credentials under the task. As of issue #27,
+        # Save-SEBCredential stores node credentials with LocalMachine-scope DPAPI (machine-bound,
+        # not user-bound) plus a restrictive ACL, so an S4U task on THIS SAME C&C host can decrypt
+        # them unattended. No stored task password or gMSA is required for credential decryption.
         $principal = New-ScheduledTaskPrincipal `
             -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
             -LogonType S4U `
             -RunLevel Highest
 
-        Write-Warning ("Scheduled task '$TaskName' uses S4U logon. DPAPI-encrypted node " +
-            "credentials must be saved as the SAME user this task runs as. If scheduled backups " +
-            "fail to decrypt credentials (while manual runs succeed), re-register the task with a " +
-            "stored password (LogonType Password) or use a group Managed Service Account so the " +
-            "DPAPI master key is available unattended.")
+        Write-Verbose ("Scheduled task '$TaskName' uses S4U logon. Node credentials saved via " +
+            "Save-SEBCredential use LocalMachine-DPAPI (issue #27) and decrypt under this task on " +
+            "the same host. If credentials were saved on a DIFFERENT machine, re-save them on this " +
+            "host with Save-SEBCredential (or Update-SEBCredential) so they are bound to this machine.")
 
         # Build task settings
         $settings = New-ScheduledTaskSettingsSet `

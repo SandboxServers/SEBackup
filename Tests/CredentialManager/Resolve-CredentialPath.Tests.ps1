@@ -9,9 +9,19 @@ BeforeAll {
 }
 
 Describe 'Resolve-CredentialPath node-name validation' {
-    It 'returns a credential file path inside Credentials/ for a valid node name' {
+    It 'returns a new-format (.cred) credential file path inside Credentials/ for a valid node name' {
         InModuleScope CredentialManager {
+            # Issue #27 changed the default store extension from .cred.xml (Clixml) to
+            # .cred (LocalMachine-DPAPI protected JSON envelope).
             $p = Resolve-CredentialPath -NodeName 'GameServer01'
+            $p | Should -Match 'GameServer01\.cred$'
+            (Split-Path $p -Leaf) | Should -Be 'GameServer01.cred'
+        }
+    }
+
+    It 'returns the legacy (.cred.xml) path when -Legacy is supplied' {
+        InModuleScope CredentialManager {
+            $p = Resolve-CredentialPath -NodeName 'GameServer01' -Legacy
             $p | Should -Match 'GameServer01\.cred\.xml$'
             (Split-Path $p -Leaf) | Should -Be 'GameServer01.cred.xml'
         }
