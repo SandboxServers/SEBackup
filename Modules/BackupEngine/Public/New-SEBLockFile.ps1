@@ -61,7 +61,7 @@ function New-SEBLockFile {
         return [PSCustomObject]@{
             Acquired        = $false
             LockFilePath    = $null
-            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, wildcards, and invalid filename characters are not allowed."
+            Reason          = "Invalid InstanceName '$InstanceName': path separators, traversal, rooted/absolute paths, wildcards, and invalid filename characters are not allowed."
             StaleLockBroken = $false
         }
     }

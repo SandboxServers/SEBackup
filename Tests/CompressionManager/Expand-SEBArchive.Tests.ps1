@@ -16,8 +16,11 @@
 # $null then, which would wrongly skip every 7zip test on a machine that HAS 7-Zip).
 BeforeDiscovery {
     $script:sevenZipAvailable = $false
-    foreach ($c in @((Join-Path $env:ProgramFiles '7-Zip\7z.exe'), (Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe'))) {
-        if ($c -and (Test-Path -Path $c -PathType Leaf)) { $script:sevenZipAvailable = $true; break }
+    # Filter out unset base vars BEFORE Join-Path -- Join-Path throws on a $null base, and
+    # ${env:ProgramFiles(x86)} can be unset on some constrained/non-Windows environments.
+    $bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+    foreach ($base in $bases) {
+        if (Test-Path -Path (Join-Path $base '7-Zip\7z.exe') -PathType Leaf) { $script:sevenZipAvailable = $true; break }
     }
     if (-not $script:sevenZipAvailable) {
         $script:sevenZipAvailable = [bool](Get-Command -Name '7z.exe' -CommandType Application -ErrorAction SilentlyContinue)
