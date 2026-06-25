@@ -128,8 +128,10 @@ function Get-SEBRestorePoints {
     # `Select-Object -First 1` behaviour.
     $archivesByStem = [System.Collections.Generic.Dictionary[string, System.IO.FileInfo]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($archiveDir in @($fullDir, $incDir)) {
-        if (-not (Test-Path -Path $archiveDir -PathType Container)) { continue }
-        Get-ChildItem -Path $archiveDir -File -ErrorAction SilentlyContinue |
+        # -LiteralPath: $archiveDir derives from cc_backup_root (config), which could contain
+        # wildcard metacharacters ([ ] etc.); -Path would treat them as globs.
+        if (-not (Test-Path -LiteralPath $archiveDir -PathType Container)) { continue }
+        Get-ChildItem -LiteralPath $archiveDir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notmatch '\.json$' -and $_.Name -notmatch '_BAD\.' } |
             ForEach-Object {
                 if (-not $archivesByStem.ContainsKey($_.BaseName)) {
@@ -187,15 +189,19 @@ function Get-SEBRestorePoints {
                 else {
                     # Verify sequential chain from 0 to this sequence
                     for ($i = 0; $i -le $chainSequence; $i++) {
-                        $member = $chainMembers | Where-Object { [int]$_['chain_sequence'] -eq $i }
-                        if (-not $member) {
+                        $member = @($chainMembers | Where-Object { [int]$_['chain_sequence'] -eq $i })
+                        # Exactly one manifest must own each sequence: zero = a gap in the chain;
+                        # more than one = ambiguous/corrupt chain metadata. Either is not a valid
+                        # restorable chain -- and treating the array as a scalar would make
+                        # $member['_source_filename'] an array and throw below, aborting discovery.
+                        if ($member.Count -ne 1) {
                             $chainValid = $false
                             break
                         }
 
                         # Check that the member's archive exists -- O(1) exact-stem lookup against
                         # the map built once above (no per-member directory scan, no globbing).
-                        $memberName = $member['_source_filename']
+                        $memberName = $member[0]['_source_filename']
                         $memberBaseName = [System.IO.Path]::GetFileNameWithoutExtension($memberName)
 
                         if (-not $archivesByStem.ContainsKey($memberBaseName)) {
