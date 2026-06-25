@@ -109,11 +109,21 @@ function Remove-SEBExpiredBackups {
 
                 foreach ($expiredFull in $expiredFulls) {
                     try {
-                        # Extract the timestamp portion to find matching incrementals
+                        # Extract the timestamp portion to find matching incrementals.
                         # Archive name format: {InstanceName}_FULL_{yyyyMMdd_HHmmss}.{ext}
-                        if ($expiredFull.Name -match '_FULL_(\d{8}_\d{6})') {
-                            $fullTimestamp = $Matches[1]
+                        # The outer filter only requires the literal '_FULL_' substring, so a
+                        # malformed name (e.g. '..._FULL_corrupt.7z') can reach here without a
+                        # valid timestamp. Skip it rather than reusing the PREVIOUS iteration's
+                        # $fullTimestamp -- doing so would prune a different (wrong) chain's
+                        # manifest and incrementals. $fullTimestamp must be set THIS iteration.
+                        if ($expiredFull.Name -notmatch '_FULL_(\d{8}_\d{6})') {
+                            $errors.Add("Skipped unparseable C&C full archive (no timestamp): '$($expiredFull.Name)'")
+                            if ($hasLogger) {
+                                Write-SEBLog -Message "Skipped unparseable C&C full archive (no timestamp), cannot identify its chain: $($expiredFull.Name)" -Level WARN -Context $InstanceName
+                            }
+                            continue
                         }
+                        $fullTimestamp = $Matches[1]
 
                         # Find the chain_id from the corresponding manifest
                         $fullManifestName = "${InstanceName}_FULL_${fullTimestamp}.json"
