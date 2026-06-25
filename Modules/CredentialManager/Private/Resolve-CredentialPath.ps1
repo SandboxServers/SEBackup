@@ -73,7 +73,12 @@ function Resolve-CredentialPath {
     $projectRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
     $credentialDir = Join-Path -Path $projectRoot -ChildPath 'Credentials'
 
-    if (-not (Test-Path -Path $credentialDir)) {
+    # -LiteralPath on the existence check: the project root can legitimately contain
+    # PowerShell wildcard characters ('[', ']') in a path segment, which a -Path
+    # Test-Path would interpret as a pattern -- making it miss an existing Credentials
+    # directory and re-run New-Item. (New-Item has no -LiteralPath, but its -Path does
+    # NOT expand wildcards for creation, so it already treats the path literally.)
+    if (-not (Test-Path -LiteralPath $credentialDir)) {
         New-Item -Path $credentialDir -ItemType Directory -Force | Out-Null
         Write-Verbose "Created credentials directory: $credentialDir"
     }

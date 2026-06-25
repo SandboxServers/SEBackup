@@ -475,3 +475,174 @@ Describe 'Write path is atomic and ACL-gated' {
         $sids | Should -Not -Contain $script:UsersSid
     }
 }
+
+Describe 'Convert-SEBLegacyCredential returns the readable legacy credential when the new-file write fails' {
+    # Copilot fix (correctness): when the legacy .cred.xml WAS readable but persisting the new
+    # protected .cred failed (SaveAction returned $false / threw), the migration helper must NOT
+    # report the credential as lost. It returns Status='NotReadable' WITH the in-memory legacy
+    # credential and KEEPS the legacy file, so the caller can still authenticate this run.
+    BeforeEach {
+        $script:wfnode = "PesterWriteFail_$([guid]::NewGuid().ToString('n'))"
+        $script:wffile = Get-CredFilePath $script:wfnode
+        $script:wflegacy = Get-LegacyCredFilePath $script:wfnode
+        $script:wfpw = 'WriteFail!P@ss-1'
+        $secure = ConvertTo-SecureString $script:wfpw -AsPlainText -Force
+        [System.Management.Automation.PSCredential]::new('TESTDOM\writefail', $secure) |
+            Export-Clixml -LiteralPath $script:wflegacy -Force
+    }
+    AfterEach {
+        foreach ($f in @($script:wffile, $script:wflegacy)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'returns NotReadable WITH the legacy credential (not $null) when SaveAction reports failure' {
+        $result = InModuleScope CredentialManager -Parameters @{ node = $script:wfnode } {
+            param($node)
+            # SaveAction returns $false (no .cred written) -- stands in for a failed/hardening-denied
+            # write. The helper must surface the still-valid legacy credential, not discard it.
+            Convert-SEBLegacyCredential -NodeName $node -SaveAction { param([PSCredential]$c) $false } 3>$null
+        }
+        $result.Status | Should -Be 'NotReadable'
+        $result.Credential | Should -BeOfType ([System.Management.Automation.PSCredential])
+        $result.Credential.GetNetworkCredential().Password | Should -Be $script:wfpw
+        # Nothing recoverable destroyed: the legacy file is kept and no new .cred was written.
+        Test-Path -LiteralPath $script:wflegacy | Should -BeTrue
+        Test-Path -LiteralPath $script:wffile | Should -BeFalse
+    }
+
+    It 'Get-SEBCredential RETURNS the recovered credential (does not throw) when the new-file write fails' {
+        # The core Copilot correctness fix: Get-SEBCredential must treat a NotReadable result that
+        # still carries a credential as a usable (warn-and-continue) outcome, NOT an error.
+        Mock -ModuleName CredentialManager Convert-SEBLegacyCredential {
+            $secure = ConvertTo-SecureString 'WriteFail!P@ss-1' -AsPlainText -Force
+            @{ Status = 'NotReadable'
+               Credential = [System.Management.Automation.PSCredential]::new('TESTDOM\writefail', $secure) }
+        }
+        $cred = $null
+        { $script:cred = Get-SEBCredential -NodeName $script:wfnode 3>$null } | Should -Not -Throw
+        $script:cred | Should -BeOfType ([System.Management.Automation.PSCredential])
+        $script:cred.UserName | Should -Be 'TESTDOM\writefail'
+        $script:cred.GetNetworkCredential().Password | Should -Be 'WriteFail!P@ss-1'
+    }
+
+    It 'Get-SEBCredential STILL throws when the legacy file is genuinely unreadable (null credential)' {
+        # The negative half: a NotReadable result with a $null credential (legacy unreadable by this
+        # account) is a real failure and must still throw the "re-save required" guidance.
+        Mock -ModuleName CredentialManager Convert-SEBLegacyCredential {
+            @{ Status = 'NotReadable'; Credential = $null }
+        }
+        { Get-SEBCredential -NodeName $script:wfnode 3>$null } | Should -Throw -ExpectedMessage '*could not be read*'
+    }
+}
+
+Describe 'Migration mutex unavailable -- fail-safe read-only path keeps the legacy file' {
+    # Copilot fix (robustness): if the cross-process migration mutex cannot be created/acquired,
+    # the destructive re-save/verify/delete MUST be skipped. The helper Get-SafeReadableLegacyCredential
+    # is what that fail-safe branch returns: it reads the legacy file READ-ONLY and reports
+    # NotReadable, writing nothing and deleting nothing. Never throws.
+    BeforeEach {
+        $script:munode = "PesterMutexSafe_$([guid]::NewGuid().ToString('n'))"
+        $script:mufile = Get-CredFilePath $script:munode
+        $script:mulegacy = Get-LegacyCredFilePath $script:munode
+        $script:mupw = 'MutexSafe!P@ss-1'
+        $secure = ConvertTo-SecureString $script:mupw -AsPlainText -Force
+        [System.Management.Automation.PSCredential]::new('TESTDOM\mutexsafe', $secure) |
+            Export-Clixml -LiteralPath $script:mulegacy -Force
+    }
+    AfterEach {
+        foreach ($f in @($script:mufile, $script:mulegacy)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'returns the readable legacy credential as NotReadable and deletes/writes nothing' {
+        $result = InModuleScope CredentialManager -Parameters @{ f = $script:mulegacy } {
+            param($f)
+            Get-SafeReadableLegacyCredential -LegacyFile $f 3>$null
+        }
+        $result.Status | Should -Be 'NotReadable'
+        $result.Credential | Should -BeOfType ([System.Management.Automation.PSCredential])
+        $result.Credential.GetNetworkCredential().Password | Should -Be $script:mupw
+        # Fail-safe MUST NOT touch the store: legacy kept, no new .cred written.
+        Test-Path -LiteralPath $script:mulegacy | Should -BeTrue
+        Test-Path -LiteralPath $script:mufile | Should -BeFalse
+    }
+
+    It 'reports NotReadable with a $null credential (never throws) when the legacy file is missing' {
+        # A defensive call against an absent legacy path must be a safe no-op, not an exception.
+        $missing = Get-LegacyCredFilePath "PesterMutexMissing_$([guid]::NewGuid().ToString('n'))"
+        $result = $null
+        {
+            $script:result = InModuleScope CredentialManager -Parameters @{ f = $missing } {
+                param($f)
+                Get-SafeReadableLegacyCredential -LegacyFile $f 3>$null
+            }
+        } | Should -Not -Throw
+        $script:result.Status | Should -Be 'NotReadable'
+        $script:result.Credential | Should -BeNullOrEmpty
+    }
+
+    It 'when the named migration mutex cannot be acquired, Convert-SEBLegacyCredential routes to the fail-safe and keeps the legacy file' {
+        # End-to-end proof of the contention routing (not just the helper). We hold the SAME named
+        # mutex this node would use so the function cannot acquire it and must fall through to the
+        # read-only fail-safe. The OS mutex is thread-affine and REENTRANT for its owner, so holding
+        # it on the test thread would let the function (run synchronously on that same thread via
+        # InModuleScope) re-acquire immediately. We therefore hold it on a SEPARATE runspace.
+        #
+        # Capability-tolerant: holding a "Global\" mutex needs SeCreateGlobalPrivilege. If the holder
+        # runspace cannot create it, the PRODUCTION code's own Mutex creation fails the same way and
+        # ALSO routes to the fail-safe (the create-failure branch). Either way the observable contract
+        # is identical -- NotReadable + the legacy credential returned, legacy file kept -- so the
+        # test asserts that contract whether contention came from a timeout or a creation failure.
+        $mutexFullName = "Global\SEBackup.CredMigrate.$script:munode"
+        $holderReady = [System.Threading.ManualResetEventSlim]::new($false)
+        $releaseHolder = [System.Threading.ManualResetEventSlim]::new($false)
+        $ps = [PowerShell]::Create()
+        $null = $ps.AddScript({
+                param($name, $ready, $release)
+                try {
+                    $m = [System.Threading.Mutex]::new($false, $name)
+                }
+                catch {
+                    # Cannot create the Global mutex here (no privilege). Signal anyway; the
+                    # production code will hit the same creation failure and fail-safe.
+                    $ready.Set()
+                    return
+                }
+                try {
+                    [void]$m.WaitOne()
+                    $ready.Set()
+                    # Hold until the test signals it has finished the contended call.
+                    [void]$release.Wait([TimeSpan]::FromSeconds(120))
+                }
+                finally { try { $m.ReleaseMutex() } catch { }; $m.Dispose() }
+            }).AddArgument($mutexFullName).AddArgument($holderReady).AddArgument($releaseHolder)
+        $async = $ps.BeginInvoke()
+        try {
+            # Wait until the holder runspace is ready (owns the mutex, or could not create it).
+            $holderReady.Wait([TimeSpan]::FromSeconds(30)) | Should -BeTrue
+
+            # If contention is real, the production wait is 30s before the fail-safe returns;
+            # if the mutex could not be created at all, it returns immediately. Either path is
+            # deterministic and yields the SAME result.
+            $result = InModuleScope CredentialManager -Parameters @{ node = $script:munode } {
+                param($node)
+                Convert-SEBLegacyCredential -NodeName $node -SaveAction { param([PSCredential]$c) $true } 3>$null
+            }
+            $result.Status | Should -Be 'NotReadable'
+            $result.Credential | Should -BeOfType ([System.Management.Automation.PSCredential])
+            $result.Credential.GetNetworkCredential().Password | Should -Be $script:mupw
+            # The fail-safe must not have written a new file or deleted the legacy one.
+            Test-Path -LiteralPath $script:mulegacy | Should -BeTrue
+            Test-Path -LiteralPath $script:mufile | Should -BeFalse
+        }
+        finally {
+            $releaseHolder.Set()
+            try { $ps.EndInvoke($async) } catch { }
+            $ps.Dispose()
+            $holderReady.Dispose()
+            $releaseHolder.Dispose()
+        }
+    }
+}

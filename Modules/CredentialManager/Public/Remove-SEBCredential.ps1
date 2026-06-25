@@ -72,7 +72,10 @@ function Remove-SEBCredential {
     $targets = @($credentialFile, $legacyFile) | Where-Object { Test-Path -LiteralPath $_ }
 
     if ($targets.Count -eq 0) {
-        Write-Warning "No credential file found for node '$NodeName' at: $credentialFile"
+        # Mention BOTH the new-format and legacy paths: a node may have only ever had a
+        # pre-#27 '.cred.xml', so surfacing just the '.cred' path hides where to look
+        # when troubleshooting a migration or a manual cleanup.
+        Write-Warning "No credential file found for node '$NodeName' (checked '$credentialFile' and legacy '$legacyFile')."
         return
     }
 

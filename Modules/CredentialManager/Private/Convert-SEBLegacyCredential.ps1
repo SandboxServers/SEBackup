@@ -32,6 +32,16 @@ function Convert-SEBLegacyCredential {
         waited on the mutex, that is treated as success (Migrated) by re-reading the
         freshly written file -- not as a sharing-violation failure.
 
+        Mutex unavailable (fail-safe): if the cross-process mutex cannot be CREATED
+        (e.g. the account lacks the SeCreateGlobalPrivilege for the "Global\"
+        namespace) or cannot be ACQUIRED within the timeout, the destructive
+        re-save/verify/delete is SKIPPED entirely -- running it without exclusion
+        could race a second process into a double write/delete. In that case the
+        legacy file is read READ-ONLY and returned (Status='NotReadable', Credential
+        set if readable) so the caller can still authenticate this run; nothing is
+        written and nothing is deleted. This preserves the "never throws / never
+        loses the only readable copy" contract.
+
         This never throws; failures are reported through the returned status so the
         calling Get/Test path can continue. Internal; not exported.
 
@@ -82,13 +92,48 @@ function Convert-SEBLegacyCredential {
     $mutex = $null
     $acquired = $false
     try {
-        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+        # Creating/opening the named mutex can FAIL on a locked-down host -- e.g. the
+        # caller lacks the SeCreateGlobalPrivilege needed for the "Global\" namespace,
+        # or a name collision yields an UnauthorizedAccessException. Treat that exactly
+        # like a failure to acquire: we must NOT run the destructive re-save/verify/delete
+        # sequence without exclusion, but we must also honor the "never throws" contract.
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+        }
+        catch {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+                "Could not create the cross-process migration mutex for node '$NodeName' " +
+                "($_); skipping the legacy re-save to avoid an unsynchronised write/delete. " +
+                "Returning the legacy credential as-is if it is readable.")
+            return (Get-SafeReadableLegacyCredential -LegacyFile $legacyFile)
+        }
+
         try {
             $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
         }
         catch [System.Threading.AbandonedMutexException] {
             # A previous holder crashed; we now own it. Safe to proceed.
             $acquired = $true
+        }
+        catch {
+            # WaitOne can also throw (e.g. AbandonedMutexException is handled above, but
+            # an unexpected wait failure must not escape). Treat as "not acquired".
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+                "Waiting on the migration mutex for node '$NodeName' failed ($_); " +
+                "skipping the legacy re-save to avoid an unsynchronised write/delete.")
+            $acquired = $false
+        }
+
+        # If exclusion could not be guaranteed (timed out, or wait failed), do NOT enter
+        # the re-save/verify/delete path -- a second process could be doing the same thing.
+        # Return the readable legacy credential (so the caller can still authenticate this
+        # run) WITHOUT writing or deleting anything. Nothing races; nothing is lost.
+        if (-not $acquired) {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+                "Could not acquire the cross-process migration mutex for node '$NodeName' " +
+                "within the timeout; skipping the legacy re-save to avoid an unsynchronised " +
+                "write/delete. Returning the legacy credential as-is if it is readable.")
+            return (Get-SafeReadableLegacyCredential -LegacyFile $legacyFile)
         }
 
         # If another process already produced the new file (won the race), treat it

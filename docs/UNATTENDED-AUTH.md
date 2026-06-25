@@ -221,7 +221,7 @@ keeping zero new module dependencies today.
 
 ## What is verified vs. deferred
 
-The unit tests (`Tests/CredentialManager/CredentialStore.Tests.ps1`) assert, on
+The unit tests (`Tests/CredentialManager/CredentialManager.Tests.ps1`) assert, on
 the build host:
 
 - Save → Get round-trips the password exactly.

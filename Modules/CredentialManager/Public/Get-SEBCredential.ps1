@@ -16,9 +16,13 @@ function Get-SEBCredential {
         exists but a legacy Export-Clixml "{NodeName}.cred.xml" does, this function
         transparently migrates it. If the legacy file is readable by the current
         user, it is re-saved in the new protected format (and the old file
-        removed) and the credential is returned. If it is NOT readable (e.g. it
-        was saved by a different user), a clear "re-save required" error is thrown
-        and the legacy file is left untouched.
+        removed) and the credential is returned. If the legacy file is readable but
+        the new-format write/hardening could not be completed (e.g. an ACL failure
+        or the migration mutex was unavailable), the still-valid in-memory
+        credential is RETURNED with a WARNING that a re-save is recommended -- the
+        legacy file is left untouched and authentication can proceed this run. Only
+        when the legacy file cannot be read at all (e.g. it was saved by a different
+        user) is a clear "re-save required" error thrown.
 
         Throws if no credential exists, or if the stored credential cannot be
         decrypted on this machine.
@@ -100,7 +104,25 @@ function Get-SEBCredential {
             return $migration.Credential
         }
 
-        # Legacy file exists but was not readable/migratable by this account.
+        # The legacy file was READABLE, but persisting/hardening the new protected file
+        # failed (SaveAction returned false or threw, the read-back verify failed, or the
+        # migration mutex was unavailable). Convert-SEBLegacyCredential signals this by
+        # returning the still-valid in-memory credential alongside a non-'Migrated' status.
+        # Authentication can proceed THIS run with that credential, so return it (it would
+        # be wrong to throw away a working credential just because the on-disk upgrade
+        # could not be completed) and WARN that a re-save is recommended.
+        if ($migration.Credential -is [PSCredential]) {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+                "Loaded the legacy credential for node '$NodeName' but could not persist it in the " +
+                "new protected format (status '$($migration.Status)'). Using the in-memory credential " +
+                "for this run; re-save it on THIS host with Save-SEBCredential -NodeName '$NodeName' so " +
+                "an unattended task can decrypt it later.")
+            Write-Verbose "Credential for node '$NodeName' loaded from legacy format (new-format write failed; User: $($migration.Credential.UserName))"
+            return $migration.Credential
+        }
+
+        # No usable credential: the legacy file exists but could not be read by this account
+        # (likely saved by a different user) or did not contain a PSCredential.
         throw "A legacy credential file exists for node '$NodeName' but could not be read by the current account " +
               "(it was likely saved by a different user). Re-save it on THIS host with " +
               "Save-SEBCredential -NodeName '$NodeName' so it is stored in the machine-readable protected format."

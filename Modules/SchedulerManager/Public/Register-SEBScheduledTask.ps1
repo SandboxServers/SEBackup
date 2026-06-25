@@ -136,10 +136,16 @@ function Register-SEBScheduledTask {
         # WARNING (not Verbose) at registration time rather than letting it fail later.
         $legacyCreds = Get-ChildItem -Path (Join-Path -Path $projectRoot -ChildPath 'Credentials') -Filter '*.cred.xml' -ErrorAction SilentlyContinue
         if ($legacyCreds) {
+            # Build the affected-node list FIRST, then concatenate. Without the extra parens
+            # around the pipeline, '-join' binds looser than the string '+', so the array was
+            # stringified with spaces and joined as a single element -- producing a malformed
+            # message. Parenthesizing forces "<node>, <node>" before it is appended.
+            $affectedNodes = ($legacyCreds |
+                ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.BaseName) } |
+                Sort-Object -Unique) -join ', '
             Write-Warning ("$($legacyCreds.Count) node credential(s) are still in the legacy '.cred.xml' format and will " +
                 "NOT decrypt under this unattended S4U task. Re-save each on THIS host before relying on the task: " +
-                "Save-SEBCredential -NodeName '<node>' (or Update-SEBCredential). Affected: " +
-                ($legacyCreds | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.BaseName) } | Sort-Object -Unique) -join ', ')
+                "Save-SEBCredential -NodeName '<node>' (or Update-SEBCredential). Affected: $affectedNodes")
         }
         Write-Warning ("The task account ('$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)') must be a local " +
             "Administrator (or otherwise covered by the credential file ACL: SYSTEM + Administrators + the saving account) to " +
