@@ -11,8 +11,9 @@
 # The C&C server uses this information to establish PSRemoting sessions to
 # the node for backup operations.
 #
-# Credentials are stored separately in Credentials/{nodename}.cred.xml
-# using DPAPI encryption (Export-Clixml). They are NOT stored in this file.
+# Credentials are stored separately in Credentials/{nodename}.cred using
+# LocalMachine-scope DPAPI (machine-bound so unattended scheduled tasks can
+# decrypt). They are NOT stored in this file. See docs/UNATTENDED-AUTH.md.
 # =============================================================================
 
 
@@ -38,6 +39,6 @@ hostname = "192.168.1.101"
 # The password is stored in the encrypted credential file, not here.
 username = "SEBackup"
 
-# Credential stored in Credentials/{nodename}.cred.xml (DPAPI encrypted)
+# Credential stored in Credentials/{nodename}.cred (LocalMachine-DPAPI protected)
 # Create it with:
-#   Get-Credential | Export-Clixml -Path "Credentials/gamingpc01.cred.xml"
+#   Save-SEBCredential -NodeName "gamingpc01"

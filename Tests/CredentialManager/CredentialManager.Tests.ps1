@@ -296,3 +296,182 @@ Describe 'Legacy migration (transparent re-save when readable)' {
         (Get-Content -LiteralPath $script:mfile -Raw).Contains($script:legacyPw) | Should -BeFalse
     }
 }
+
+Describe 'Test-SEBCredential treats a legacy-only credential as NOT ready (re-save required)' {
+    # SECURITY-CRITICAL (8-lens altitude/major): a legacy CurrentUser-DPAPI .cred.xml does NOT
+    # decrypt under an S4U task with no profile -- the exact unattended scenario this API gates.
+    # Reporting such a node as "available" is a false-green readiness signal: the preflight would
+    # pass and the unattended backup would then fail. Test-SEBCredential must return $false for a
+    # legacy-only node (even one readable by the current interactive user) and must NOT migrate it.
+    BeforeEach {
+        $script:lnode = "PesterLegacyTest_$([guid]::NewGuid().ToString('n'))"
+        $script:lfile = Get-CredFilePath $script:lnode
+        $script:llegacy = Get-LegacyCredFilePath $script:lnode
+        $secure = ConvertTo-SecureString 'LegacyOnly!P@ss-1' -AsPlainText -Force
+        # Saved by THIS user, so Import-Clixml here WOULD succeed -- the old behavior returned $true.
+        [System.Management.Automation.PSCredential]::new('TESTDOM\legacy', $secure) |
+            Export-Clixml -LiteralPath $script:llegacy -Force
+    }
+    AfterEach {
+        foreach ($f in @($script:lfile, $script:llegacy)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'returns $false for a legacy-only credential even though it is readable by the current user' {
+        # Sanity: the legacy file is in fact readable by this user (so the result is about policy,
+        # not unreadability).
+        { Import-Clixml -LiteralPath $script:llegacy } | Should -Not -Throw
+        Test-SEBCredential -NodeName $script:lnode | Should -BeFalse
+    }
+
+    It 'does NOT migrate the legacy file (side-effect-free): no .cred is created' {
+        Test-SEBCredential -NodeName $script:lnode | Out-Null
+        Test-Path -LiteralPath $script:lfile  | Should -BeFalse   # no new protected file written
+        Test-Path -LiteralPath $script:llegacy | Should -BeTrue    # legacy left untouched
+    }
+}
+
+Describe 'Migration verifies decrypt round-trip BEFORE deleting the legacy copy' {
+    # SECURITY-CRITICAL (8-lens altitude/blast-radius/major): an irreversible migration must
+    # "verify the replacement is recoverable, THEN destroy the source". If the just-written .cred
+    # cannot be decrypted back on this host (e.g. an entropy-fallback divergence between write and
+    # read), the legacy .cred.xml -- the only readable copy -- must be KEPT and a failure reported.
+    # We simulate the undecryptable-replacement condition without Pester mocks by having the
+    # re-save action persist a credential whose password differs, so the read-back comparison fails.
+    BeforeEach {
+        $script:vnode = "PesterVerifyMig_$([guid]::NewGuid().ToString('n'))"
+        $script:vfile = Get-CredFilePath $script:vnode
+        $script:vlegacy = Get-LegacyCredFilePath $script:vnode
+        $script:vpw = 'VerifyMig!P@ss-1'
+        $secure = ConvertTo-SecureString $script:vpw -AsPlainText -Force
+        [System.Management.Automation.PSCredential]::new('TESTDOM\verify', $secure) |
+            Export-Clixml -LiteralPath $script:vlegacy -Force
+    }
+    AfterEach {
+        foreach ($f in @($script:vfile, $script:vlegacy)) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'keeps the legacy file and reports NotReadable when the new blob fails read-back verification' {
+        $status = InModuleScope CredentialManager -Parameters @{ node = $script:vnode } {
+            param($node)
+            $result = Convert-SEBLegacyCredential -NodeName $node -SaveAction {
+                param([PSCredential]$cred)
+                # Write a DIFFERENT password so the verify-before-delete comparison fails,
+                # standing in for an entropy-divergent / undecryptable replacement.
+                $wrong = [System.Management.Automation.PSCredential]::new(
+                    $cred.UserName, (ConvertTo-SecureString 'DIVERGENT-DOES-NOT-MATCH' -AsPlainText -Force))
+                Write-SEBProtectedCredentialFile -NodeName $node -Credential $wrong
+            } 3>$null 4>$null
+            $result.Status
+        }
+        $status | Should -Be 'NotReadable'
+        # The only readable copy (legacy) must survive.
+        Test-Path -LiteralPath $script:vlegacy | Should -BeTrue
+        # The unverifiable new file must not be left behind to mask the legacy copy.
+        Test-Path -LiteralPath $script:vfile | Should -BeFalse
+    }
+
+    It 'a normal (matching) migration DOES delete the legacy file after a successful round-trip' {
+        # Control case: the real save action round-trips, so the legacy file is removed.
+        $back = Get-SEBCredential -NodeName $script:vnode
+        $back.GetNetworkCredential().Password | Should -Be $script:vpw
+        Test-Path -LiteralPath $script:vfile  | Should -BeTrue
+        Test-Path -LiteralPath $script:vlegacy | Should -BeFalse
+    }
+}
+
+Describe 'ConvertFrom-SEBProtectedCredential honors the envelope Version/Scope discriminators' {
+    # 8-lens altitude/walmart (major/minor): Version and Scope must be load-bearing, not decorative.
+    # An envelope whose Version this build does not understand must be REJECTED with a clear result
+    # (returns $null) rather than fed to the v1 decode path and failing with an opaque crypto error.
+    It 'rejects an unknown envelope Version (returns $null)' {
+        InModuleScope CredentialManager {
+            $secure = ConvertTo-SecureString 'VersionGuard!1' -AsPlainText -Force
+            $env = ConvertTo-SEBProtectedCredential -Credential ([System.Management.Automation.PSCredential]::new('u', $secure))
+            $env.Version = 2   # a version this build does not support
+            (ConvertFrom-SEBProtectedCredential -Envelope $env 3>$null) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'rejects an unknown Scope/backend (returns $null)' {
+        InModuleScope CredentialManager {
+            $secure = ConvertTo-SecureString 'ScopeGuard!1' -AsPlainText -Force
+            $env = ConvertTo-SEBProtectedCredential -Credential ([System.Management.Automation.PSCredential]::new('u', $secure))
+            $env.Scope = 'SomeFutureBackend'
+            (ConvertFrom-SEBProtectedCredential -Envelope $env 3>$null) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'still decodes a current (Version=1, Scope=LocalMachine) envelope' {
+        InModuleScope CredentialManager {
+            $secure = ConvertTo-SecureString 'GoodEnvelope!1' -AsPlainText -Force
+            $env = ConvertTo-SEBProtectedCredential -Credential ([System.Management.Automation.PSCredential]::new('keep\me', $secure))
+            $env.Version | Should -Be 1
+            $env.EntropyVersion | Should -Not -BeNullOrEmpty
+            $back = ConvertFrom-SEBProtectedCredential -Envelope $env
+            $back | Should -BeOfType ([System.Management.Automation.PSCredential])
+            $back.GetNetworkCredential().Password | Should -Be 'GoodEnvelope!1'
+        }
+    }
+}
+
+Describe 'Corrupt/empty .cred is handled consistently by Get and Test' {
+    # 8-lens adversarial (minor): an empty/whitespace .cred (a truncated write or externally touched
+    # file) yields a $null envelope from ConvertFrom-Json WITHOUT throwing. Get must surface the
+    # friendly corruption error (not a raw ParameterBindingValidationException) and Test must return
+    # $false -- and they must agree on the same file.
+    BeforeEach {
+        $script:cnode = "PesterCorrupt_$([guid]::NewGuid().ToString('n'))"
+        $script:cfile = Get-CredFilePath $script:cnode
+        Set-Content -LiteralPath $script:cfile -Value '' -Encoding UTF8 -Force
+    }
+    AfterEach {
+        if (Test-Path -LiteralPath $script:cfile) { Remove-Item -LiteralPath $script:cfile -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'Get-SEBCredential throws a corruption message (not a raw binding exception)' {
+        { Get-SEBCredential -NodeName $script:cnode } | Should -Throw -ExpectedMessage '*corrupt*'
+    }
+
+    It 'Test-SEBCredential returns $false for the same empty file' {
+        Test-SEBCredential -NodeName $script:cnode | Should -BeFalse
+    }
+}
+
+Describe 'Write path is atomic and ACL-gated' {
+    # 8-lens adversarial/red-team (critical/major): a write must not leave a temp file behind, and
+    # the published file must carry an explicit (protected) ACL -- the only local confidentiality
+    # boundary. (A live Set-Acl failure cannot be forced unelevated in a unit test; we assert the
+    # observable guarantees: no temp residue and an explicit, Users-free, protected ACL.)
+    BeforeEach {
+        $script:wnode = "PesterAtomic_$([guid]::NewGuid().ToString('n'))"
+        $script:wfile = Get-CredFilePath $script:wnode
+        $secure = ConvertTo-SecureString 'Atomic!P@ss-1' -AsPlainText -Force
+        Save-SEBCredential -NodeName $script:wnode -Credential ([System.Management.Automation.PSCredential]::new('u', $secure)) 3>$null
+    }
+    AfterEach {
+        foreach ($f in @($script:wfile, (Get-LegacyCredFilePath $script:wnode))) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
+        # Defensive: clean any stray temp files from this node.
+        Get-ChildItem -Path (Split-Path $script:wfile) -Filter "$($script:wnode).cred.tmp.*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'leaves no ".tmp.*" residue next to the published file' {
+        $stray = Get-ChildItem -Path (Split-Path $script:wfile) -Filter "$($script:wnode).cred.tmp.*" -ErrorAction SilentlyContinue
+        @($stray).Count | Should -Be 0
+        Test-Path -LiteralPath $script:wfile | Should -BeTrue
+    }
+
+    It 'publishes a file whose DACL is protected (explicit, not inherited) and excludes Users' {
+        $acl = Get-Acl -LiteralPath $script:wfile
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })
+        $sids | Should -Contain $script:SystemSid
+        $sids | Should -Not -Contain $script:UsersSid
+    }
+}

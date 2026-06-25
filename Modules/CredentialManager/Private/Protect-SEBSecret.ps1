@@ -46,13 +46,19 @@ function Protect-SEBSecret {
         [byte[]]$Bytes
     )
 
+    $entropy = $null
     try {
-        $entropy = Get-SEBSecretEntropy
+        # Always protect under the CURRENT entropy version; the caller records that
+        # version in the envelope so Unprotect can reproduce the matching entropy.
+        $entropy = Get-SEBSecretEntropy -Version $script:SEBEntropyVersion
         $scope = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         return [System.Security.Cryptography.ProtectedData]::Protect($Bytes, $entropy, $scope)
     }
     catch {
         Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message "Failed to protect secret with LocalMachine DPAPI: $_"
         return $null
+    }
+    finally {
+        if ($entropy) { [Array]::Clear($entropy, 0, $entropy.Length) }
     }
 }

@@ -98,11 +98,11 @@ Export-ModuleMember -Function $Public.BaseName
 
 ## Credential Handling Rules
 
-- Credentials are stored using **DPAPI encryption** via `Export-Clixml` / `Import-Clixml`.
-- Credential files live in `Credentials/{nodename}.cred.xml`.
+- Node passwords are protected via `System.Security.Cryptography.ProtectedData` (**LocalMachine** scope) + per-machine entropy, stored Base64 inside a JSON envelope at `Credentials/{nodename}.cred`. Machine-bound (not user-bound) so unattended S4U tasks on the same host can decrypt.
+- The legacy `Export-Clixml` `.cred.xml` (CurrentUser DPAPI) format is read **only** by the transparent migration path. `Save`/`Get`/`Update`/`Remove`/`Test-SEBCredential` are the supported API.
 - **Never** store plaintext passwords in config files, scripts, or logs.
 - Use `Save-SEBCredential` / `Get-SEBCredential` from the CredentialManager module.
-- DPAPI credentials are machine-and-user bound. They only work for the user who created them on the same machine.
+- DPAPI credentials are machine-bound (LocalMachine). They work for any authorized account on the same machine (subject to the file ACL), which is what lets unattended S4U tasks decrypt them.
 
 ## Remote Execution Rules
 

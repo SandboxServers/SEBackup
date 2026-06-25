@@ -4,17 +4,29 @@ function ConvertFrom-SEBProtectedCredential {
         Rebuilds a PSCredential from the on-disk protected-credential envelope.
 
     .DESCRIPTION
-        The inverse of ConvertTo-SEBProtectedCredential. Validates the envelope,
+        The inverse of ConvertTo-SEBProtectedCredential. Validates the envelope --
+        including the load-bearing Format, Version, and Scope discriminators --
         Base64-decodes the protected password, decrypts it via Unprotect-SEBSecret
-        (LocalMachine DPAPI + per-machine entropy), and reconstructs a PSCredential
-        whose password is a SecureString. The decrypted plaintext is appended to
-        the SecureString character by character and the transient byte buffer is
-        zeroed in a finally block.
+        (LocalMachine DPAPI + the per-machine entropy of the version recorded in
+        the envelope), and reconstructs a PSCredential whose password is a
+        SecureString. The decrypted bytes are decoded to UTF-16 code units and
+        appended to the SecureString one code unit at a time; every transient
+        buffer (the decrypted UTF-8 bytes and the char[]) is zeroed in a finally
+        block so the cleartext is never held in a managed String.
 
-        Returns $null (rather than throwing) when the envelope is malformed or the
-        decryption fails -- for example when the blob was created on a different
-        machine or under a rotated entropy version. The caller decides how to
-        surface that (e.g. "re-save required").
+        Forward/back compatibility: Version is honored, not decorative. An envelope
+        whose Version this build does not understand is REJECTED with a clear
+        warning (returns $null) rather than being fed to the wrong decode path and
+        failing with a generic CryptographicException. Scope is validated to match
+        the backend this build implements. EntropyVersion is passed through to
+        Unprotect so a blob written under an earlier entropy rotation can still be
+        decrypted.
+
+        Returns $null (rather than throwing) when the envelope is malformed,
+        carries an unsupported version/scope, or the decryption fails -- for
+        example when the blob was created on a different machine or under a rotated
+        entropy that is no longer derivable. The caller decides how to surface that
+        (e.g. "re-save required").
 
         Internal helper; not exported.
 
@@ -41,6 +53,8 @@ function ConvertFrom-SEBProtectedCredential {
     # Read fields tolerantly so either a ConvertFrom-Json PSCustomObject or a
     # hashtable works.
     $format   = $Envelope.Format
+    $version  = $Envelope.Version
+    $scope    = $Envelope.Scope
     $userName = $Envelope.UserName
     $b64       = $Envelope.ProtectedSecret
 
@@ -48,23 +62,52 @@ function ConvertFrom-SEBProtectedCredential {
         Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Credential envelope has unexpected format '$format' (expected 'SEBCredential')."
         return $null
     }
+
+    # Version is load-bearing: reject an envelope this build does not understand
+    # rather than feeding a future format to the v1 decode path (which would fail
+    # with an opaque CryptographicException). This is the forward-compat seam.
+    $supportedVersion = 1
+    if ($null -eq $version -or [int]$version -ne $supportedVersion) {
+        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+            "Credential envelope declares unsupported version '$version' " +
+            "(this build supports version $supportedVersion). Re-save the credential on this host.")
+        return $null
+    }
+
+    # Scope selects which protection backend wrote the blob. This build implements
+    # only the LocalMachine-DPAPI backend; reject anything else explicitly so a
+    # future scope (e.g. a gMSA/cert backend) cannot be silently mis-decrypted.
+    if ($null -ne $scope -and $scope -ne 'LocalMachine') {
+        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+            "Credential envelope declares scope '$scope', but this build only " +
+            "supports the 'LocalMachine' backend. Re-save the credential on this host.")
+        return $null
+    }
+
     if ([string]::IsNullOrWhiteSpace($userName) -or [string]::IsNullOrWhiteSpace($b64)) {
         Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Credential envelope is missing UserName or ProtectedSecret."
         return $null
     }
 
+    # Entropy version the blob was written under (defaults to current if absent for
+    # forward-written v1 files that predate the field).
+    $entropyVersion = if ($null -ne $Envelope.EntropyVersion) { [int]$Envelope.EntropyVersion } else { $script:SEBEntropyVersion }
+
     $plainBytes = $null
+    $chars = $null
     try {
         $protected = [Convert]::FromBase64String($b64)
-        $plainBytes = Unprotect-SEBSecret -Bytes $protected
+        $plainBytes = Unprotect-SEBSecret -Bytes $protected -EntropyVersion $entropyVersion
         if ($null -eq $plainBytes) {
             # Unprotect-SEBSecret already logged the underlying CryptographicException.
             return $null
         }
 
-        $plain = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+        # Decode UTF-8 -> UTF-16 code units into a char[] we own (no managed String
+        # of the secret), append to the SecureString, then scrub the char[].
+        $chars = [System.Text.Encoding]::UTF8.GetChars($plainBytes)
         $secure = [System.Security.SecureString]::new()
-        foreach ($ch in $plain.ToCharArray()) {
+        foreach ($ch in $chars) {
             $secure.AppendChar($ch)
         }
         $secure.MakeReadOnly()
@@ -77,5 +120,6 @@ function ConvertFrom-SEBProtectedCredential {
     }
     finally {
         if ($plainBytes) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+        if ($chars)      { [Array]::Clear($chars, 0, $chars.Length) }
     }
 }

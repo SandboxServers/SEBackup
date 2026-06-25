@@ -69,20 +69,30 @@ function Save-SEBCredential {
     }
 
     try {
+        # Resolve both paths once up front and reuse them (no redundant re-resolves).
+        $credentialFile = Resolve-CredentialPath -NodeName $NodeName
+        $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
+
         $saved = Write-SEBProtectedCredentialFile -NodeName $NodeName -Credential $Credential
         if (-not $saved) {
             throw "Credential protection or file write failed (see log for details)."
         }
 
         # If a legacy Clixml file for this node still exists, remove it so the two
-        # stores cannot diverge. The new protected file is now authoritative.
-        $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
+        # stores cannot diverge -- but only after confirming the new protected file
+        # actually decrypts back to the credential we just saved. Otherwise a write
+        # that cannot be read later (entropy fallback divergence) plus a legacy
+        # delete would leave nothing recoverable.
         if (Test-Path -LiteralPath $legacyFile) {
-            Remove-Item -LiteralPath $legacyFile -Force -ErrorAction SilentlyContinue
-            Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Removed superseded legacy credential file '$legacyFile' for node '$NodeName'."
+            if (Test-SEBProtectedCredentialReadBack -Path $credentialFile -Expected $Credential) {
+                Remove-Item -LiteralPath $legacyFile -Force -ErrorAction SilentlyContinue
+                Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Removed superseded legacy credential file '$legacyFile' for node '$NodeName' (new file verified on read-back)."
+            }
+            else {
+                Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Saved a new protected credential for node '$NodeName' but it did not verify on read-back; KEEPING the legacy file '$legacyFile' as a fallback."
+            }
         }
 
-        $credentialFile = Resolve-CredentialPath -NodeName $NodeName
         Write-Verbose "Credential saved for node '$NodeName' at: $credentialFile"
         Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Saved credential for node '$NodeName' (user '$($Credential.UserName)') using LocalMachine-DPAPI protected store." -NoConsole
     }

@@ -252,8 +252,8 @@ C:\SEBackup\                        # Project root (or wherever you cloned it)
       GamePC01.toml                 # Per-node config
       GamePC02.toml
   Credentials\
-    GamePC01.cred.xml               # DPAPI-encrypted credentials
-    GamePC02.cred.xml
+    GamePC01.cred                   # LocalMachine-DPAPI credentials (.cred.xml = legacy, migrated on first read)
+    GamePC02.cred
   Logs\
     SEBackup_2026-02-27.log         # Daily rotating logs
   Data\
@@ -295,7 +295,7 @@ C:\SEBackup\                        # NodeAgent root
 
 ## Security Model
 
-- **Credentials:** Stored encrypted with DPAPI (`Export-Clixml`). Machine-and-user bound. Never stored in plaintext.
+- **Credentials:** Stored encrypted with LocalMachine-scope DPAPI + per-machine entropy, machine-bound (not user-bound), ACL-restricted; see docs/UNATTENDED-AUTH.md. Never stored in plaintext.
 - **WinRM:** Uses PowerShell Remoting over HTTP (port 5985) by default. Can be configured for HTTPS (port 5986) for encryption in transit.
 - **SMB Shares:** Hidden shares (suffixed with `$`) with access restricted to Administrators.
 - **VRage API:** Authenticated with HMAC-SHA1 signatures (nonce + date + key).

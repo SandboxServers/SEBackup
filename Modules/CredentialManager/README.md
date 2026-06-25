@@ -8,14 +8,14 @@ Credential storage for WinRM/PSRemoting authentication. Node passwords are encry
 
 ### Save-SEBCredential
 
-Prompts for credentials and saves them as a DPAPI-encrypted XML file for the specified compute node.
+Prompts for credentials (if not supplied) and saves them for the specified compute node as a LocalMachine-DPAPI protected `.cred` file with a hardened ACL.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
 | NodeName | string | Yes | -- | The name of the compute node to store credentials for. |
 | Credential | PSCredential | No | prompted | A PSCredential object. If not provided, the user is prompted via `Get-Credential`. |
 
-**Output:** `System.String` -- the path to the saved credential file.
+**Output:** None. The credential is written to `Credentials/{NodeName}.cred`.
 
 ```powershell
 Save-SEBCredential -NodeName "GameServer01"
@@ -24,19 +24,17 @@ Save-SEBCredential -NodeName "GameServer01" -Credential $cred
 
 ### Get-SEBCredential
 
-Retrieves a previously saved DPAPI-encrypted credential for a compute node.
+Retrieves a previously saved LocalMachine-DPAPI protected credential for a compute node.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
 | NodeName | string | Yes | -- | The name of the compute node whose credential to retrieve. |
 
-**Output:** `PSCredential` -- the decrypted credential object, or `$null` if not found.
+**Output:** `PSCredential` -- the decrypted credential. Throws if the credential is missing or cannot be decrypted on this host.
 
 ```powershell
 $cred = Get-SEBCredential -NodeName "GameServer01"
-if ($null -ne $cred) {
-    Write-Host "Username: $($cred.UserName)"
-}
+Write-Host "Username: $($cred.UserName)"
 ```
 
 ### Remove-SEBCredential
@@ -61,7 +59,7 @@ Tests whether a valid credential file exists for the specified compute node and 
 |-----------|------|:--------:|---------|-------------|
 | NodeName | string | Yes | -- | The name of the compute node to test. |
 
-**Output:** `System.Boolean` -- `$true` if a valid credential file exists and is decryptable.
+**Output:** `System.Boolean` -- `$true` only if a protected, machine-decryptable `.cred` exists; `$false` if missing, undecryptable, or legacy-only (re-save required).
 
 ```powershell
 if (Test-SEBCredential -NodeName "GameServer01") {
@@ -96,6 +94,7 @@ Update-SEBCredential -NodeName "GameServer01" -Credential $new   # replace the s
 | `Write-SEBProtectedCredentialFile` | The single write path: envelope → JSON file → restrictive ACL. |
 | `Set-SEBCredentialAcl` | Locks down the file/dir to SYSTEM + Administrators + the saving account; removes inherited/`Users` access. Idempotent. |
 | `Convert-SEBLegacyCredential` | Best-effort migration of a legacy `.cred.xml` to the new format. |
+| `Test-SEBProtectedCredentialReadBack` | Round-trip-verifies a just-written `.cred` decrypts on this host (and matches an expected credential) before any destructive legacy delete. |
 
 ## Dependencies
 

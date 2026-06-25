@@ -23,6 +23,14 @@ function Get-SEBCredential {
         Throws if no credential exists, or if the stored credential cannot be
         decrypted on this machine.
 
+        NOTE -- migrate-on-read side effect: unlike a pure read, this function may
+        MUTATE the store. When only a legacy ".cred.xml" exists, it re-saves the
+        credential in the new protected format and deletes the legacy file (after a
+        verified read-back), and resolving the path may create and harden the
+        Credentials directory. The migration is serialized with a per-node
+        cross-process mutex so concurrent callers do not collide. Callers that need
+        a side-effect-free probe should use Test-SEBCredential instead.
+
     .PARAMETER NodeName
         The name of the remote node whose credential should be retrieved.
 
@@ -57,6 +65,15 @@ function Get-SEBCredential {
         catch {
             Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message "Failed to read/parse credential file '$credentialFile' for node '$NodeName': $_"
             throw "Failed to read credential for node '$NodeName' from '$credentialFile'. The file may be corrupted: $_"
+        }
+
+        # An empty/whitespace .cred (e.g. an externally truncated/touched file) yields
+        # a $null envelope from ConvertFrom-Json WITHOUT throwing. Guard it explicitly
+        # so we surface the friendly corruption message rather than a raw parameter
+        # binding exception from ConvertFrom-SEBProtectedCredential's [ValidateNotNull].
+        if ($null -eq $envelope) {
+            Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message "Credential file '$credentialFile' for node '$NodeName' is empty or not valid JSON."
+            throw "Failed to read credential for node '$NodeName' from '$credentialFile'. The file may be corrupted (empty or invalid)."
         }
 
         $credential = ConvertFrom-SEBProtectedCredential -Envelope $envelope

@@ -90,6 +90,14 @@ function Set-SEBCredentialAcl {
         # Fast path: if the DACL is already protected and grants exactly the desired
         # FullControl trustees, do nothing. Avoids a needless security-descriptor
         # write (which needs SeSecurityPrivilege on an already-protected file).
+        # For a DIRECTORY the shape check is necessary-but-insufficient: the grants
+        # must ALSO be inheritable (ContainerInherit|ObjectInherit, PropagationFlags
+        # None) or newly written .cred files would not inherit the lockdown. A dir
+        # protected with the right trustees but NON-inheritable ACEs must fall
+        # through to the rewrite, so we verify inheritance flags too.
+        $containerInherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit
+        $objectInherit = [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $requiredInherit = $containerInherit -bor $objectInherit
         if ($acl.AreAccessRulesProtected) {
             $presentSids = [System.Collections.Generic.HashSet[string]]::new()
             $matchesShape = $true
@@ -98,6 +106,14 @@ function Set-SEBCredentialAcl {
                     $rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl) {
                     $matchesShape = $false
                     break
+                }
+                if ($isDirectory) {
+                    # Every grant must carry both inheritance flags and no propagation flags.
+                    if ((($rule.InheritanceFlags -band $requiredInherit) -ne $requiredInherit) -or
+                        ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None)) {
+                        $matchesShape = $false
+                        break
+                    }
                 }
                 [void]$presentSids.Add($rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value)
             }
@@ -118,8 +134,7 @@ function Set-SEBCredentialAcl {
         }
 
         $inheritance = if ($isDirectory) {
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
-                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+            $requiredInherit
         }
         else {
             [System.Security.AccessControl.InheritanceFlags]::None

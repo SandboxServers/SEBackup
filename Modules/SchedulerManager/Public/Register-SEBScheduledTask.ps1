@@ -129,6 +129,22 @@ function Register-SEBScheduledTask {
             "the same host. If credentials were saved on a DIFFERENT machine, re-save them on this " +
             "host with Save-SEBCredential (or Update-SEBCredential) so they are bound to this machine.")
 
+        # An S4U task loads no user profile, so a node still holding ONLY a legacy
+        # CurrentUser-DPAPI .cred.xml cannot be decrypted under it -- that node's
+        # backup will fail until it is re-saved in the machine-bound protected format.
+        # This is the exact pre-#27 state the store migrates, so surface it as a real
+        # WARNING (not Verbose) at registration time rather than letting it fail later.
+        $legacyCreds = Get-ChildItem -Path (Join-Path -Path $projectRoot -ChildPath 'Credentials') -Filter '*.cred.xml' -ErrorAction SilentlyContinue
+        if ($legacyCreds) {
+            Write-Warning ("$($legacyCreds.Count) node credential(s) are still in the legacy '.cred.xml' format and will " +
+                "NOT decrypt under this unattended S4U task. Re-save each on THIS host before relying on the task: " +
+                "Save-SEBCredential -NodeName '<node>' (or Update-SEBCredential). Affected: " +
+                ($legacyCreds | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.BaseName) } | Sort-Object -Unique) -join ', ')
+        }
+        Write-Warning ("The task account ('$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)') must be a local " +
+            "Administrator (or otherwise covered by the credential file ACL: SYSTEM + Administrators + the saving account) to " +
+            "read the protected '.cred' files at run time.")
+
         # Build task settings
         $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `

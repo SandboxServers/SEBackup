@@ -13,12 +13,24 @@ function Convert-SEBLegacyCredential {
         ("{NodeName}.cred") via the supplied re-save script block.
 
         Outcomes:
-        - Migrated  : legacy file was readable; a new ".cred" was written. The
-          legacy ".cred.xml" is then deleted so it is not mistaken for current.
+        - Migrated  : legacy file was readable; a new ".cred" was written AND
+          verified to decrypt back to the same credential on this host. Only then
+          is the legacy ".cred.xml" deleted, so the readable copy is never removed
+          before the replacement is proven recoverable.
         - NotReadable: legacy file exists but could not be decrypted (e.g. it was
-          created by a different user). It is LEFT in place and the caller surfaces
-          a clear "re-save required" warning. Nothing is destroyed.
+          created by a different user), OR the new ".cred" was written but failed
+          the decrypt round-trip. In both cases the legacy file is LEFT in place
+          and the caller surfaces a clear "re-save required" warning. Nothing
+          recoverable is destroyed.
         - None      : no legacy file present.
+
+        Concurrency: the read-back-verify-then-delete sequence runs under a named
+        cross-process mutex keyed on the node, because Get-SEBCredential is now
+        called from several unsynchronised contexts (New-SEBSession,
+        Test-SEBConnection, multiple per-instance backups of the same node). If
+        another process won the race and already produced the new ".cred" while we
+        waited on the mutex, that is treated as success (Migrated) by re-reading the
+        freshly written file -- not as a sharing-violation failure.
 
         This never throws; failures are reported through the returned status so the
         calling Get/Test path can continue. Internal; not exported.
@@ -55,52 +67,115 @@ function Convert-SEBLegacyCredential {
     )
 
     $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
+    $newFile = Resolve-CredentialPath -NodeName $NodeName
 
     if (-not (Test-Path -LiteralPath $legacyFile)) {
         return @{ Status = 'None'; Credential = $null }
     }
 
-    # Try to read the legacy Clixml credential. This only succeeds for the same
-    # user that saved it (CurrentUser DPAPI), which is the whole reason #27 exists.
-    $legacyCred = $null
+    # Serialize the whole re-save/verify/delete across processes. Get-SEBCredential
+    # (which calls this) runs from several unsynchronised callers, so two backups of
+    # the same node could otherwise both re-save and delete concurrently. The mutex
+    # name is derived from the node and must be a legal mutex name (Resolve has
+    # already validated NodeName, so it is filename-safe).
+    $mutexName = "Global\SEBackup.CredMigrate.$NodeName"
+    $mutex = $null
+    $acquired = $false
     try {
-        $legacyCred = Import-Clixml -LiteralPath $legacyFile -ErrorAction Stop
-    }
-    catch {
-        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
-            "Legacy credential '$legacyFile' could not be read for migration " +
-            "(likely saved by a different user): $_")
-        return @{ Status = 'NotReadable'; Credential = $null }
-    }
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # A previous holder crashed; we now own it. Safe to proceed.
+            $acquired = $true
+        }
 
-    if ($legacyCred -isnot [PSCredential]) {
-        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Legacy credential file '$legacyFile' did not contain a PSCredential; leaving it in place."
-        return @{ Status = 'NotReadable'; Credential = $null }
-    }
+        # If another process already produced the new file (won the race), treat it
+        # as migrated by reading it back, rather than racing a second delete/write.
+        if (Test-Path -LiteralPath $newFile) {
+            $existing = $null
+            try {
+                $raw = Get-Content -LiteralPath $newFile -Raw -ErrorAction Stop
+                $existing = ($raw | ConvertFrom-Json -ErrorAction Stop | ForEach-Object { ConvertFrom-SEBProtectedCredential -Envelope $_ })
+            }
+            catch { $existing = $null }
+            if ($existing -is [PSCredential]) {
+                Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Migration of node '$NodeName' was completed concurrently by another process; using the existing protected credential."
+                return @{ Status = 'Migrated'; Credential = $existing }
+            }
+        }
 
-    # Re-save in the new format using the injected writer.
-    try {
-        $saved = & $SaveAction $legacyCred
-        if (-not $saved) {
-            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migration of '$NodeName' failed while writing the new protected credential; legacy file left intact."
+        # Try to read the legacy Clixml credential. This only succeeds for the same
+        # user that saved it (CurrentUser DPAPI), which is the whole reason #27 exists.
+        $legacyCred = $null
+        try {
+            $legacyCred = Import-Clixml -LiteralPath $legacyFile -ErrorAction Stop
+        }
+        catch {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
+                "Legacy credential '$legacyFile' could not be read for migration " +
+                "(likely saved by a different user): $_")
+            return @{ Status = 'NotReadable'; Credential = $null }
+        }
+
+        if ($legacyCred -isnot [PSCredential]) {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Legacy credential file '$legacyFile' did not contain a PSCredential; leaving it in place."
+            return @{ Status = 'NotReadable'; Credential = $null }
+        }
+
+        # Re-save in the new format using the injected writer.
+        try {
+            $saved = & $SaveAction $legacyCred
+            if (-not $saved) {
+                Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migration of '$NodeName' failed while writing the new protected credential; legacy file left intact."
+                return @{ Status = 'NotReadable'; Credential = $legacyCred }
+            }
+        }
+        catch {
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migration of '$NodeName' threw while writing the new protected credential; legacy file left intact: $_"
             return @{ Status = 'NotReadable'; Credential = $legacyCred }
         }
-    }
-    catch {
-        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migration of '$NodeName' threw while writing the new protected credential; legacy file left intact: $_"
-        return @{ Status = 'NotReadable'; Credential = $legacyCred }
-    }
 
-    # New format written successfully -- remove the legacy file so it is not
-    # ambiguous which store is authoritative.
-    try {
-        Remove-Item -LiteralPath $legacyFile -Force -ErrorAction Stop
-        Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Migrated credential for node '$NodeName' from legacy Clixml to LocalMachine-DPAPI protected format; removed '$legacyFile'."
-    }
-    catch {
-        # The new file is valid; failing to delete the old one is non-fatal.
-        Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migrated '$NodeName' to the new format but could not remove the legacy file '$legacyFile': $_"
-    }
+        # VERIFY BEFORE DELETE: confirm the just-written .cred actually decrypts back
+        # to the same credential on THIS host before destroying the only other
+        # readable copy. If the entropy that protected it cannot be reproduced (e.g.
+        # MachineGuid fallback divergence), keep the legacy file and report failure.
+        if (-not (Test-SEBProtectedCredentialReadBack -Path $newFile -Expected $legacyCred)) {
+            Write-SEBLog -Level ERROR -Context 'CredentialManager' -Message (
+                "Migration of node '$NodeName' wrote a new protected credential that did NOT " +
+                "verify on read-back; KEEPING the legacy file '$legacyFile' so nothing is lost. " +
+                "Re-save on this host with Save-SEBCredential -NodeName '$NodeName'.")
+            # Remove the unverifiable new file so a later read does not surface it as
+            # an undecryptable .cred that masks the still-readable legacy copy.
+            Remove-Item -LiteralPath $newFile -Force -ErrorAction SilentlyContinue
+            return @{ Status = 'NotReadable'; Credential = $legacyCred }
+        }
 
-    return @{ Status = 'Migrated'; Credential = $legacyCred }
+        # Replacement verified -- now it is safe to remove the legacy file.
+        try {
+            Remove-Item -LiteralPath $legacyFile -Force -ErrorAction Stop
+            Write-SEBLog -Level INFO -Context 'CredentialManager' -Message "Migrated credential for node '$NodeName' from legacy Clixml to LocalMachine-DPAPI protected format (verified on read-back); removed '$legacyFile'."
+        }
+        catch {
+            # The new file is valid and verified; failing to delete the old one is non-fatal.
+            Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Migrated '$NodeName' to the new format but could not remove the legacy file '$legacyFile': $_"
+        }
+
+        return @{ Status = 'Migrated'; Credential = $legacyCred }
+    }
+    finally {
+        if ($mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() }
+                catch {
+                    # Best-effort release during cleanup; a failure here (e.g. the
+                    # mutex was already released/abandoned) must not mask the real
+                    # result. Log at DEBUG rather than swallow silently.
+                    Write-SEBLog -Level DEBUG -Context 'CredentialManager' -Message "Releasing migration mutex for node '$NodeName' failed (non-fatal): $_" -NoConsole
+                }
+            }
+            $mutex.Dispose()
+        }
+    }
 }

@@ -9,13 +9,18 @@ function Update-SEBCredential {
         ACL. Two modes:
 
         - Re-encrypt in place (default): with no -Credential, the existing stored
-          credential is loaded via Get-SEBCredential and saved again. Use this
-          after the protection parameters change -- for example after bumping the
-          entropy salt version, after migrating from the legacy Clixml store, or
-          to re-stamp the file's ACL. The username and password are preserved
-          exactly. (This obviously requires the existing blob to still be readable
-          on this host; if the entropy was already rotated past the point of no
-          return, supply -Credential instead.)
+          credential is loaded via Get-SEBCredential and saved again under the
+          CURRENT entropy version. Use this after the protection parameters change
+          -- for example after bumping the entropy salt version
+          ($script:SEBEntropyVersion), after migrating from the legacy Clixml
+          store, or to re-stamp the file's ACL. The username and password are
+          preserved exactly. Because the blob records the EntropyVersion it was
+          written under and Get-SEBCredential decrypts with that recorded version,
+          re-encrypting a credential written before an entropy bump DOES work in
+          place (the old entropy is still derivable from its version number). The
+          only case that requires -Credential is when the existing blob is
+          genuinely unreadable on this host (wrong machine, or a version this build
+          no longer knows).
 
         - Replace the secret: pass -Credential (e.g. after the node's password was
           changed) to store new material. The node's existing credential does not
@@ -84,15 +89,25 @@ function Update-SEBCredential {
     }
 
     try {
+        $credentialFile = Resolve-CredentialPath -NodeName $NodeName
+
         $saved = Write-SEBProtectedCredentialFile -NodeName $NodeName -Credential $target
         if (-not $saved) {
             throw "Credential protection or file write failed (see log for details)."
         }
 
-        # Clean up any superseded legacy file so the protected file stays authoritative.
+        # Clean up any superseded legacy file so the protected file stays
+        # authoritative -- but only after confirming the new file decrypts back to
+        # the credential we just wrote, so a non-readable rotation never removes the
+        # legacy fallback.
         $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
         if (Test-Path -LiteralPath $legacyFile) {
-            Remove-Item -LiteralPath $legacyFile -Force -ErrorAction SilentlyContinue
+            if (Test-SEBProtectedCredentialReadBack -Path $credentialFile -Expected $target) {
+                Remove-Item -LiteralPath $legacyFile -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                Write-SEBLog -Level WARN -Context 'CredentialManager' -Message "Rotated credential for node '$NodeName' but it did not verify on read-back; KEEPING the legacy file '$legacyFile' as a fallback."
+            }
         }
 
         Write-Verbose "Credential rotated for node '$NodeName' (User: $($target.UserName))"

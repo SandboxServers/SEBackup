@@ -23,6 +23,12 @@ function Unprotect-SEBSecret {
     .PARAMETER Bytes
         The protected (encrypted) byte array to decrypt. Must not be null.
 
+    .PARAMETER EntropyVersion
+        The entropy/salt version the blob was written under (from the envelope's
+        EntropyVersion field). Defaults to the current $script:SEBEntropyVersion.
+        Passing the recorded version lets a blob written before an entropy rotation
+        still be decrypted (Get-SEBSecretEntropy derives the matching salt).
+
     .OUTPUTS
         System.Byte[]
         The decrypted plaintext byte array, or $null on failure (the error is
@@ -37,11 +43,15 @@ function Unprotect-SEBSecret {
     param(
         [Parameter(Mandatory, Position = 0)]
         [ValidateNotNull()]
-        [byte[]]$Bytes
+        [byte[]]$Bytes,
+
+        [Parameter(Position = 1)]
+        [int]$EntropyVersion = $script:SEBEntropyVersion
     )
 
+    $entropy = $null
     try {
-        $entropy = Get-SEBSecretEntropy
+        $entropy = Get-SEBSecretEntropy -Version $EntropyVersion
         $scope = [System.Security.Cryptography.DataProtectionScope]::LocalMachine
         return [System.Security.Cryptography.ProtectedData]::Unprotect($Bytes, $entropy, $scope)
     }
@@ -50,5 +60,8 @@ function Unprotect-SEBSecret {
             "Failed to unprotect secret with LocalMachine DPAPI (wrong machine, " +
             "rotated entropy, or corrupted data): $_")
         return $null
+    }
+    finally {
+        if ($entropy) { [Array]::Clear($entropy, 0, $entropy.Length) }
     }
 }

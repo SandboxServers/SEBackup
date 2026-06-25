@@ -6,11 +6,18 @@ function Resolve-CredentialPath {
 
     .DESCRIPTION
         Internal helper function that determines the absolute path to the
-        Credentials/ directory at the project root. The path is resolved
-        relative to the CredentialManager module location, which resides at
-        Modules/CredentialManager/ -- two levels below the project root.
+        Credentials/ directory at the project root. This function lives at
+        Modules/CredentialManager/Private/ -- THREE levels below the project root
+        -- so it walks up three parents to reach it (matching the BackupEngine
+        lock-file helpers at the same depth). The store therefore lands at the
+        documented project-root Credentials/ directory, NOT Modules/Credentials/.
 
-        If the Credentials directory does not exist, this function creates it.
+        If the Credentials directory does not exist, this function creates it. On
+        every resolution it (re)applies the restrictive ACL to the directory so an
+        already-existing Credentials/ (created by an earlier version, the legacy
+        .cred.xml era, git, or another tool) is locked down too -- not only when
+        this code creates it. Set-SEBCredentialAcl is idempotent, so the call is
+        cheap when the directory is already hardened.
 
         When -NodeName is supplied, the node-specific credential FILE path is
         returned. The node name is validated so it cannot traverse out of the
@@ -59,18 +66,26 @@ function Resolve-CredentialPath {
         [switch]$Legacy
     )
 
-    # Navigate from Modules/CredentialManager/ up to project root, then into Credentials/
-    $projectRoot = Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent
+    # Navigate from Modules/CredentialManager/Private/ up to the project root
+    # (three parents: Private -> CredentialManager -> Modules -> root), then into
+    # Credentials/. This matches BackupEngine\Public\New-SEBLockFile.ps1 and keeps
+    # the store at the project-root Credentials/ that every doc references.
+    $projectRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
     $credentialDir = Join-Path -Path $projectRoot -ChildPath 'Credentials'
 
     if (-not (Test-Path -Path $credentialDir)) {
         New-Item -Path $credentialDir -ItemType Directory -Force | Out-Null
         Write-Verbose "Created credentials directory: $credentialDir"
-        # Harden the directory on creation so credential files inherit a locked-down
-        # ACL. Best-effort: a failure here is logged inside Set-SEBCredentialAcl and
-        # must not block path resolution (the files get their own ACL on save too).
-        $null = Set-SEBCredentialAcl -Path $credentialDir
     }
+
+    # Harden the directory on EVERY resolution, not just on creation: an existing
+    # Credentials/ (legacy era, manual mkdir, git checkout) would otherwise keep its
+    # inherited Users access, and a newly written .cred would inherit that before
+    # its own ACL is stamped. Set-SEBCredentialAcl is idempotent (fast-path returns
+    # without a security-descriptor write when already hardened), so this is cheap.
+    # Best-effort: a failure is logged inside Set-SEBCredentialAcl and must not block
+    # path resolution (each file also gets its own ACL on save).
+    $null = Set-SEBCredentialAcl -Path $credentialDir
 
     if ($PSBoundParameters.ContainsKey('NodeName')) {
         # A node name is used as a filename component. Reject anything with a path separator,

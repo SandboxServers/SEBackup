@@ -192,9 +192,11 @@ When `Get-SEBCredential` finds no `{NodeName}.cred` but a legacy
   Save-SEBCredential -NodeName 'GameServer01'
   ```
 
-`Test-SEBCredential` and `Remove-SEBCredential` are migration-aware too:
-`Test-SEBCredential` reports a legacy file as available only if it is readable, and
-`Remove-SEBCredential` deletes both the `.cred` and any leftover `.cred.xml`.
+`Test-SEBCredential` and `Remove-SEBCredential` handle the legacy format too:
+`Test-SEBCredential` returns `$false` for a legacy-only node — a CurrentUser `.cred.xml`
+does not decrypt under an S4U task, so it reports "re-save required" rather than a
+false-green readiness — and `Remove-SEBCredential` deletes both the `.cred` and any
+leftover `.cred.xml`.
 
 ## Threat model summary
 
