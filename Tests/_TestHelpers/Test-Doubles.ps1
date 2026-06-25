@@ -43,13 +43,15 @@ function New-FakeSession {
     $session = [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
         [System.Management.Automation.Runspaces.PSSession])
 
+    # Capture the value via a closure (not string-interpolation into [scriptblock]::Create), so a
+    # single quote in the name can't break the getter and there's no string-parsing/injection risk.
     if ($PSBoundParameters.ContainsKey('Name')) {
         $session | Add-Member -Force -MemberType ScriptProperty -Name Name `
-            -Value ([scriptblock]::Create("'$Name'"))
+            -Value { $Name }.GetNewClosure()
     }
     if ($PSBoundParameters.ContainsKey('Target')) {
         $session | Add-Member -Force -MemberType ScriptProperty -Name ComputerName `
-            -Value ([scriptblock]::Create("'$Target'"))
+            -Value { $Target }.GetNewClosure()
     }
 
     return $session
