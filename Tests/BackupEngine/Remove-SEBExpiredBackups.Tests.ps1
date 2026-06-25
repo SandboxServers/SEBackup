@@ -99,9 +99,11 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
         $ccManifests = Join-Path $ccDir 'manifests'
         New-Item -Path $ccFull, $ccInc, $ccManifests -ItemType Directory -Force | Out-Null
         try {
-            # Two distinct chains, each with a full + a dependent incremental.
-            $chainA = [guid]::NewGuid().ToString()   # NEWEST valid full -> must be kept
-            $chainB = [guid]::NewGuid().ToString()   # OLDEST valid full -> the legitimate expiry target
+            # Two distinct chains, each with a full + a dependent incremental. With cc_full_count=0
+            # below, BOTH chains legitimately expire; A/B just label newest vs oldest valid full so
+            # we can assert each is pruned by its OWN timestamp and never via a stale one.
+            $chainA = [guid]::NewGuid().ToString()   # newest valid full
+            $chainB = [guid]::NewGuid().ToString()   # oldest valid full
 
             # Manifests (archive base name -> chain_id) for both chains.
             New-Manifest -Dir $ccManifests -Name 'Survival_FULL_20260301_000000.json' -Type 'full'        -ChainId $chainA -Seq 0
@@ -138,8 +140,8 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
 
             $result = Remove-SEBExpiredBackups -InstanceName $inst -GlobalConfig $config
 
-            # The corrupt full was processed between chain A and chain B fulls. With the bug it
-            # would reuse chain A's (or B's) timestamp and double-prune. With the fix it is
+            # The corrupt full sorts FIRST (descending) and is processed before the dated fulls.
+            # With the bug it would reuse a later iteration's timestamp and double-prune; with the fix it is
             # skipped. Both valid chains are legitimately expired (keep=0), so BOTH manifests/
             # incrementals are gone -- but each must be removed by its OWN matching full, exactly
             # once, never via the stale-timestamp path. The decisive assertion: the skip was
