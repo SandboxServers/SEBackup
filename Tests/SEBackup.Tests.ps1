@@ -166,17 +166,19 @@ Describe 'ConfigManager Module' {
     # must be computed in BeforeDiscovery (a BeforeAll value would still be $null at
     # discovery and the contexts would always skip).
     BeforeDiscovery {
-        $psTomlAvailable = $null -ne (Get-Module -Name PSToml -ListAvailable -ErrorAction SilentlyContinue)
+        # Script-scoped so the discovery-time flag reliably survives the BeforeDiscovery block
+        # and is visible to the -Skip: expressions below (also evaluated at discovery).
+        $script:psTomlAvailable = $null -ne (Get-Module -Name PSToml -ListAvailable -ErrorAction SilentlyContinue)
         # In CI, PSToml MUST be present: a silent skip would weaken the merge gate (the
         # ConfigManager tests would simply vanish from the count). Fail loudly instead.
         # $env:CI is a string, so test for an explicit truthy value -- a bare `if ($env:CI)`
         # is true even for CI="false".
-        if (-not $psTomlAvailable -and ($env:CI -match '^(true|1)$')) {
+        if (-not $script:psTomlAvailable -and ($env:CI -match '^(true|1)$')) {
             throw 'PSToml is not installed. Install it before running the gate suite in CI (Install-Module PSToml -Force).'
         }
     }
 
-    Context 'Module functions exist' -Skip:(-not $psTomlAvailable) {
+    Context 'Module functions exist' -Skip:(-not $script:psTomlAvailable) {
         BeforeAll {
             $configMgrPath = Join-Path $ModulesPath 'ConfigManager\ConfigManager.psm1'
             if (Test-Path $configMgrPath) {
@@ -195,7 +197,7 @@ Describe 'ConfigManager Module' {
         }
     }
 
-    Context 'Global config loading' -Skip:(-not $psTomlAvailable) {
+    Context 'Global config loading' -Skip:(-not $script:psTomlAvailable) {
         It 'Get-SEBGlobalConfig returns a hashtable with expected sections' {
             $config = Get-SEBGlobalConfig -Force
             $config | Should -Not -BeNullOrEmpty
