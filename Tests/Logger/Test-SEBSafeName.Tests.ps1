@@ -36,6 +36,8 @@ Describe 'Test-SEBSafeName' {
     Context 'rejects traversal, separators, rooted paths, wildcards, and invalid filename chars' {
         It "rejects '<Name>' (<Why>)" -ForEach @(
             @{ Name = '..';                     Why = 'bare parent traversal' }
+            @{ Name = '.';                      Why = "current-directory segment (Join-Path collapses to root)" }
+            @{ Name = '...';                    Why = 'all-dots relative reference' }
             @{ Name = '../x';                   Why = 'forward-slash traversal' }
             @{ Name = '..\x';                   Why = 'back-slash traversal' }
             @{ Name = 'a/b';                    Why = 'forward-slash separator' }
@@ -80,7 +82,10 @@ Describe 'Test-SEBSafeName' {
     }
 
     Context 'is callable from a ValidateScript context' {
-        # This mirrors Get-SEBRestorePoints, which uses [ValidateScript({ Test-SEBSafeName -Name $_ -Throw })].
+        # Verifies Test-SEBSafeName is usable inside a parameter [ValidateScript({ ... })] guard --
+        # the pattern shown in the function's own documented ValidateScript example
+        # ([ValidateScript({ Test-SEBSafeName -Name $_ -Throw })]) -- so a safe value binds and an
+        # unsafe one raises a terminating binding error.
         It 'lets a safe value bind and rejects an unsafe value' {
             function Test-ValidateScriptUsage {
                 param([ValidateScript({ Test-SEBSafeName -Name $_ -Throw })][string]$Instance)

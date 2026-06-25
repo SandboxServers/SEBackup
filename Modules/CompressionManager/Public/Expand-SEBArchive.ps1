@@ -91,7 +91,9 @@ function Expand-SEBArchive {
 
             # Track whether WE created the destination, so a zip-slip abort can clean up a directory
             # that did not exist before this call (avoid leaving an empty dir behind on rejection).
-            $destPreexisted = Test-Path -Path $Destination -PathType Container
+            # -LiteralPath so a destination containing wildcard metacharacters can't match a
+            # DIFFERENT existing directory and wrongly report the dir as pre-existing.
+            $destPreexisted = Test-Path -LiteralPath $Destination -PathType Container
 
             # Create destination if needed
             if (-not $destPreexisted) {
@@ -124,10 +126,17 @@ function Expand-SEBArchive {
             # machine-parseable listing Get-SEBArchiveContents uses) and resolve each against the
             # destination root; if ANY entry escapes, abort BEFORE writing anything.
             $destRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            # The containment prefix comparison must match the filesystem's case sensitivity. On
+            # Windows paths are case-insensitive, so an entry differing only in case is the same
+            # location and OrdinalIgnoreCase is correct. On a case-sensitive filesystem (Linux),
+            # OrdinalIgnoreCase would WRONGLY accept an entry that differs in case from $destRoot
+            # yet resolves to a different (escaping) directory -- so use a case-sensitive Ordinal
+            # comparison there.
+            $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
             $listOutput = & $sevenZip l -slt $Archive 2>&1
             if ($LASTEXITCODE -ne 0) {
-                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
-                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not $destPreexisted -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+                    Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 throw "7-Zip listing failed (exit code $LASTEXITCODE); cannot verify archive entries before extraction."
             }
@@ -161,7 +170,7 @@ function Expand-SEBArchive {
                     # collapsed by GetFullPath, catching traversal. Folder entries are checked too:
                     # a '..' directory entry is just as unsafe to recreate as a file.
                     $resolved = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Destination, $entryPath))
-                    if (-not $resolved.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    if (-not $resolved.StartsWith($destRoot, $cmp)) {
                         $offending = $entryPath
                         break
                     }
@@ -169,8 +178,8 @@ function Expand-SEBArchive {
             }
 
             if ($null -ne $offending) {
-                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
-                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not $destPreexisted -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+                    Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 throw "Refusing to extract '$Archive': entry '$offending' would escape the destination '$Destination' (zip-slip/path traversal)."
             }
@@ -183,8 +192,8 @@ function Expand-SEBArchive {
             # archive (only the header 'Path =', no entry metadata) is NOT penalised: there is nothing
             # to extract that could escape.
             if (-not $inEntries -and ($pathLineCount -gt 1 -or $sawEntryMetadata)) {
-                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
-                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not $destPreexisted -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+                    Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 throw "Refusing to extract '$Archive': 7-Zip listing did not delimit its entry section, so archive entries could not be verified for path traversal before extraction."
             }
@@ -221,8 +230,9 @@ function Expand-SEBArchive {
             )
 
             # Track whether WE created the destination so a zip-slip abort can clean up a directory
-            # that did not exist before this call.
-            $destPreexisted = Test-Path -Path $Destination -PathType Container
+            # that did not exist before this call. -LiteralPath so a destination containing wildcard
+            # metacharacters can't match a DIFFERENT existing directory and skew this check.
+            $destPreexisted = Test-Path -LiteralPath $Destination -PathType Container
 
             # Create destination if needed
             if (-not $destPreexisted) {
@@ -235,6 +245,11 @@ function Expand-SEBArchive {
             # against the destination root, and abort BEFORE writing anything if one escapes.
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
             $destRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            # Match the filesystem's case sensitivity for the containment prefix check: Windows
+            # paths are case-insensitive (OrdinalIgnoreCase), but on a case-sensitive filesystem
+            # OrdinalIgnoreCase would wrongly accept a case-differing entry that resolves outside
+            # $destRoot, so compare case-sensitively (Ordinal) there.
+            $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
             $offending = $null
             $zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
             try {
@@ -244,7 +259,7 @@ function Expand-SEBArchive {
                     # entry uniformly. Path.Combine discards $Destination for a rooted entry (so it
                     # falls outside $destRoot), and GetFullPath collapses '..' traversal.
                     $resolved = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Destination, $entry.FullName))
-                    if (-not $resolved.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    if (-not $resolved.StartsWith($destRoot, $cmp)) {
                         $offending = $entry.FullName
                         break
                     }
@@ -255,8 +270,8 @@ function Expand-SEBArchive {
             }
 
             if ($null -ne $offending) {
-                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
-                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not $destPreexisted -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+                    Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
                 }
                 throw "Refusing to extract '$Archive': entry '$offending' would escape the destination '$Destination' (zip-slip/path traversal)."
             }

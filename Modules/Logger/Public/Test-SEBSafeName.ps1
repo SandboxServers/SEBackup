@@ -21,13 +21,18 @@ function Test-SEBSafeName {
 
         - It contains a path separator: '\' or '/'.
         - It contains the traversal sequence '..'.
+        - It consists entirely of dots ('.', '...', etc.). '.' is the current-directory reference,
+          which collapses under Join-Path ('Join-Path $Root ''.''' resolves back to $Root) and would
+          bypass the per-instance directory boundary; an all-dots name is likewise not a real segment.
         - It is a rooted path according to [System.IO.Path]::IsPathRooted (e.g. 'C:\x', '\\srv\s').
         - It contains a PowerShell wildcard metacharacter: '*', '?', '[', or ']'.
         - It contains any character returned by [System.IO.Path]::GetInvalidFileNameChars().
 
-        It deliberately ALLOWS otherwise-legitimate names that contain '.', '-', '_', or spaces
-        (for example 'PvP.Arena' or 'My Server'), because the config layer, the backup engine, and
-        the lock layer all accept such names. A null, empty, or whitespace-only value is rejected.
+        It deliberately ALLOWS otherwise-legitimate names that merely contain '.', '-', '_', or
+        spaces (for example 'PvP.Arena' or 'My Server'), because the config layer, the backup engine,
+        and the lock layer all accept such names. (Only a name that is ENTIRELY dots is rejected, per
+        the rule above; an embedded dot in a real name is fine.) A null, empty, or whitespace-only
+        value is rejected.
 
         By default the function returns a [bool] so callers can branch on the result. When -Throw
         is supplied, it instead throws a clear, descriptive error on an invalid name (and returns
@@ -86,6 +91,14 @@ function Test-SEBSafeName {
     }
     elseif ($Name.Contains('..')) {
         $reason = "it contains the '..' traversal sequence."
+    }
+    elseif ($Name -match '^\.+$') {
+        # A name made up entirely of dots ('.', '...', etc.) is a relative directory reference,
+        # not a real segment. '.' in particular collapses under Join-Path: Join-Path $Root '.'
+        # resolves back to $Root, bypassing the intended per-instance subdirectory boundary, so a
+        # backup/restore could read or write the shared root instead of its own folder. (The plain
+        # '..' case is already caught above; this rejects the single-dot and all-dot variants too.)
+        $reason = "it is a relative directory reference ('.' or all dots), which is not a valid path segment."
     }
     elseif ([System.IO.Path]::IsPathRooted($Name)) {
         $reason = 'it is a rooted/absolute path.'
