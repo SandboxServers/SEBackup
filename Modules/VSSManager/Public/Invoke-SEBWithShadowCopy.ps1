@@ -83,6 +83,16 @@ function Invoke-SEBWithShadowCopy {
     $mountPoint = $null
     $mounted = $false
 
+    # This function takes $Session BY VALUE, but its VSS sub-calls (New/Mount/Dismount/Remove)
+    # route through Invoke-SEBRemoteCommand, which on a dead handle reconnects into the module
+    # cache WITHOUT writing back into this local $Session. The central world-capture below and
+    # the finally cleanup are raw Invoke-Command on $Session, so they would run on a stale handle
+    # after such a reconnect. Refresh $Session from the cache (a HIT returns the live session;
+    # after any reconnect the cache holds the live handle) after each sub-call, keyed off the
+    # node parsed from the session Name. If the session was not created by New-SEBSession (no
+    # 'SEBackup-<node>' name -> no cache entry), refresh is a no-op and we keep the caller's handle.
+    $cacheNode = if ($Session.Name -match '^SEBackup-(.+)$') { $Matches[1] } else { $null }
+
     try {
         # Step 1: Create the shadow copy
         Write-Verbose "VSSManager: Starting shadow copy lifecycle on $($Session.ComputerName) for volume $Volume"
@@ -92,6 +102,8 @@ function Invoke-SEBWithShadowCopy {
             Write-Error "VSSManager: Failed to create shadow copy on $($Session.ComputerName) for volume $Volume"
             return $null
         }
+        # Refresh in case the create reconnected the cached session.
+        if ($cacheNode) { $Session = New-SEBSession -NodeName $cacheNode }
 
         # Step 2: Mount the shadow copy with a timestamped directory name
         $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -103,6 +115,9 @@ function Invoke-SEBWithShadowCopy {
             Write-Error "VSSManager: Failed to mount shadow copy at $mountPoint on $($Session.ComputerName)"
             return $null
         }
+        # Refresh in case the mount reconnected the cached session, so the raw capture below
+        # (and the finally cleanup) use the live handle.
+        if ($cacheNode) { $Session = New-SEBSession -NodeName $cacheNode }
 
         $mounted = $true
         Write-Verbose "VSSManager: Shadow copy mounted at $mountPoint, executing script block"
@@ -122,7 +137,15 @@ function Invoke-SEBWithShadowCopy {
         return $result
     }
     finally {
-        # Step 4: Clean up - dismount and remove shadow copy regardless of outcome
+        # Step 4: Clean up - dismount and remove shadow copy regardless of outcome.
+        # Refresh the handle from the cache first: the script block above (or an earlier sub-call)
+        # may have left $Session stale via a cache-only reconnect, and the cleanup sub-calls take
+        # the session by value -- using the live handle avoids a failed teardown that leaks a
+        # mounted snapshot.
+        if ($cacheNode) {
+            $live = New-SEBSession -NodeName $cacheNode
+            if ($live) { $Session = $live }
+        }
 
         # Dismount if we successfully mounted
         if ($mounted -and $mountPoint) {

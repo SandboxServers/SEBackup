@@ -63,15 +63,13 @@ function New-SEBSession {
         [hashtable]$NodeConfig
     )
 
-    # Check for a cached session that is still usable. Availability (not just State)
-    # is the authoritative liveness signal -- a session can be State=Opened yet
-    # Availability=Busy/None and unable to accept a new command. Mirror this exact
-    # condition in Test-SEBSessionExists and Invoke-SEBRemoteCommand.
+    # Check for a cached session that is still usable. Liveness is decided by the
+    # single shared predicate Test-SEBSessionUsable (State=Opened AND
+    # Availability=Available) -- the same predicate Test-SEBSessionExists and
+    # Invoke-SEBRemoteCommand use, so there is exactly one definition of "usable".
     if ($script:SEBSessions.ContainsKey($NodeName)) {
         $existingSession = $script:SEBSessions[$NodeName]
-        $isOpen = $existingSession.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened
-        $isAvailable = $existingSession.Availability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::Available
-        if ($isOpen -and $isAvailable) {
+        if (Test-SEBSessionUsable -Session $existingSession) {
             Write-Verbose "Returning cached session for node '$NodeName' (ID: $($existingSession.Id))"
             return $existingSession
         }

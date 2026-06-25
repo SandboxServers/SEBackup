@@ -77,15 +77,15 @@ if (Test-SEBConnection -NodeName "GameServer01") {
 
 ### Invoke-SEBRemoteCommand
 
-Executes a script block on a remote node via an existing PSSession. Includes retry logic, error handling, and logging.
+Executes a script block on a remote node via an existing PSSession. Includes retry logic, session-health/reconnect handling, error handling, and logging.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
 | Session | PSSession | Yes | -- | An active PSSession to the target node. |
 | ScriptBlock | scriptblock | Yes | -- | The script block to execute remotely. |
 | ArgumentList | object[] | No | -- | Arguments to pass to the script block. |
-| RetryCount | int | No | `2` | Number of times to retry on failure. |
-| RetryDelaySeconds | int | No | `5` | Seconds to wait between retries. |
+| RetryCount | int | No | `1` | Retries on failure (total attempts = RetryCount + 1). **Pass `0` for any non-idempotent / mutating block** so a post-mutation transport drop is not silently re-run. See "Idempotency and -RetryCount" below. |
+| SessionRef | ref | No | -- | `[ref]` to the caller's session variable; updated in place when the wrapper reconnects a dead session. See "Reconnect propagation" below. |
 
 **Output:** The return value of the remote script block.
 
@@ -95,6 +95,27 @@ $result = Invoke-SEBRemoteCommand -Session $session -ScriptBlock {
     Get-ChildItem -Path $path -Recurse -File
 } -ArgumentList "C:\GameData"
 ```
+
+#### Idempotency and -RetryCount
+
+The wrapper retries on transport-level failures. Because `Invoke-Command` can throw AFTER the
+remote block has already run (the link drops while the result is coming back), a retry can
+RE-EXECUTE the block. That is fine for idempotent work (reads, hashing/verification, metrics,
+disk space) but dangerous for anything that mutates node state (VSS create/mount/remove, world
+rename + robocopy, service start/stop, file deletes, best-effort cleanups). **Migrate mutating
+calls with `-RetryCount 0`** so a transport failure fails fast into the caller's own
+rollback/abort handling instead of running the mutation twice.
+
+#### Reconnect propagation
+
+If a session is found dead, the wrapper reconnects ONCE (preserving the original hostname/IP and
+the friendly node/credential key, and reusing a healthy cached session if one exists). Any caller
+that holds a session in a local variable across MULTIPLE calls should pass `-SessionRef
+([ref]$session)` so the refreshed live session is written back into that variable; otherwise the
+local keeps pointing at the dead handle until the next call re-detects it. By-value helpers that
+cannot take a `[ref]` (e.g. the CompressionManager paths and `Invoke-SEBWithShadowCopy`) instead
+re-fetch the live session from the cache via `New-SEBSession -NodeName <node>` (a cache hit
+returns the live handle) immediately before each raw data-path call.
 
 ### Get-SEBSharePath
 
@@ -144,7 +165,9 @@ $mount = Mount-SEBShare -SharePath "\\GameServer01\SEBackup_PvP" -Credential $cr
 
 ## Private Functions
 
-This module has no private helper files. All logic is contained within the public functions.
+| Function | Purpose |
+|----------|---------|
+| `Test-SEBSessionUsable` | The single liveness predicate (`State=Opened` AND `Availability=Available`) shared by `New-SEBSession`, `Test-SEBSessionExists`, and `Invoke-SEBRemoteCommand`, so "is this session usable" has exactly one definition. |
 
 ## Module-Scoped Variables
 
@@ -174,7 +197,7 @@ $freeSpace = Invoke-SEBRemoteCommand -Session $session -ScriptBlock {
     (Get-PSDrive C).Free / 1GB
 }
 Write-Host "Free space: $([math]::Round($freeSpace, 2)) GB"
-Remove-SEBSession -Session $session
+Remove-SEBSession -NodeName "GameServer01"
 ```
 
 **Scenario 2: Testing connectivity to all nodes**

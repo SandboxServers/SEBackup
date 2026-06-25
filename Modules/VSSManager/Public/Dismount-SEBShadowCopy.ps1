@@ -51,8 +51,12 @@ function Dismount-SEBShadowCopy {
     Write-Verbose "VSSManager: Dismounting shadow copy at $MountPoint on $($Session.ComputerName)"
 
     try {
-        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
-        $result = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
+        # VSS lifecycle write (removes the mount-point symlink), run from cleanup. -RetryCount 0:
+        # this is a single-shot teardown -- a transport drop after the symlink is removed must
+        # not trigger a retry+backoff that buys nothing (the block already treats a missing
+        # mount point as success). Route through the wrapper for logging/reconnect; the block
+        # stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
             param($Mount)
 
             try {

@@ -252,9 +252,11 @@ function Invoke-SEBRestore {
             $chainManifestsOrdered | Sort-Object -Property { [int]$_['chain_sequence'] }
         )
 
-        # Clean up any previous restore temp dir.
-        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
-        Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
+        # Clean up any previous restore temp dir. NON-IDEMPOTENT (removes + recreates a dir);
+        # -RetryCount 0 so a transport drop mid-operation does not re-run it. A hard failure
+        # throws and aborts before any archive work. Route through the wrapper for
+        # logging/reconnect; the block stays node-local.
+        Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
             param($tempDir)
             if (Test-Path -Path $tempDir -PathType Container) {
                 Remove-Item -Path $tempDir -Recurse -Force -ErrorAction Stop
@@ -322,9 +324,12 @@ function Invoke-SEBRestore {
                 throw "No share_name configured. Cannot transfer archive to node."
             }
 
-            # Extract on the node.
-            # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
-            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
+            # Extract on the node. NON-IDEMPOTENT (writes/overwrites files into the temp
+            # reconstruction, and for incrementals copies over an existing tree); -RetryCount 0
+            # so a transport drop after extraction does not re-run it. A failure throws and
+            # aborts the restore before any deploy. Route through the wrapper for
+            # logging/reconnect; the block stays node-local.
+            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
                 param($archPath, $destDir, $archType)
 
                 if ($archPath.EndsWith('.7z')) {
@@ -416,7 +421,9 @@ function Invoke-SEBRestore {
         }
 
         $targetManifest = $chainManifestsOrdered | Select-Object -Last 1
-        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        # IDEMPOTENT read-only verification (Test-Path + Get-FileHash), so it KEEPS the default
+        # retry (safe to run twice). Route through the wrapper for retry/logging/reconnect; the
+        # block stays node-local.
         $verifyResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($restoreDir, $expectedFiles)
 
@@ -559,9 +566,11 @@ function Invoke-SEBRestore {
         # STEP 11: Cleanup temp directory
         # ====================================================================
         try {
-            # Route temp-dir cleanup through the wrapper for retry/logging/reconnect. A hard failure
-            # throws and is caught below as a non-fatal warning (same outcome as before).
-            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
+            # Best-effort temp-dir cleanup. -RetryCount 0: its only failure outcome is the
+            # warning below, so a retry+~1s backoff on a transient failure just adds a needless
+            # round-trip and latency on the restore completion path for the same end result.
+            # Route through the wrapper for logging/reconnect; the block stays node-local.
+            Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
                 param($tempDir)
                 if (Test-Path -Path $tempDir -PathType Container) {
                     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue

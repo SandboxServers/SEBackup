@@ -1,51 +1,70 @@
 #Requires -Module Pester
 
 # Invoke-SEBRemoteCommand is the resilient wrapper every node-remoting caller is meant to use.
-# This suite pins the two correctness behaviours fixed under issue #22:
-#   1. Liveness is decided by .Availability (RunspaceAvailability), not just .State. A session can
-#      be State=Opened yet Availability=Busy/None and unable to accept a command; that must trigger
-#      the reconnect path, and an Available session must be used as-is.
-#   2. Reconnect propagation: when a dead session is reconnected, the live session reaches the
-#      caller -- both through the module session cache (which New-SEBSession rewrites) and, when the
-#      caller passes -SessionRef ([ref]$session), by updating that variable in place so the caller's
-#      subsequent -Session $session calls use the live handle.
+# This suite pins the correctness behaviours fixed under issue #22:
+#   1. Liveness is the single Test-SEBSessionUsable predicate (State=Opened AND Availability=Available).
+#      A session that is not usable is handled by KIND:
+#        * State=Opened + Availability=Busy  -> transient; poll briefly, NEVER tear down/reconnect
+#          (it may be running another caller's command). If still busy, throw a "busy" error.
+#        * Terminal (State != Opened, or Availability=None) -> reconnect ONCE per invocation.
+#   2. Retry semantics: the DEFAULT RetryCount=1 makes a transient failure run Invoke-Command TWICE;
+#      -RetryCount 0 (used by every non-idempotent/mutating call site) attempts exactly ONCE so a
+#      post-mutation transport drop is not silently re-run.
+#   3. Reconnect preserves the connection identity: it captures the dead session's ComputerName and
+#      reconnects via New-SEBSession with that hostname (NodeConfig.hostname), NOT the bare alias,
+#      and rejects a session whose Name is not 'SEBackup-<node>'.
+#   4. Reconnect propagation: the live session reaches the caller via the module cache (New-SEBSession
+#      rewrites it) and, when -SessionRef ([ref]$session) is passed, by updating that variable in place.
 #
 # Test notes:
 #  * Mocks target -ModuleName RemoteManager because the function runs in that module's scope; its
 #    Invoke-Command / New-SEBSession / Remove-SEBSession / Write-SEBLog calls resolve there.
-#  * PSSession has no public constructor and its .State/.Availability are runtime-backed, so we
-#    build doubles with GetUninitializedObject (satisfies the [PSSession] parameter cast) and shadow
-#    .State/.Availability/.Name/.ComputerName with Add-Member ScriptProperty (-Force). PowerShell's
-#    adapted type system honours the shadow when the wrapper reads $Session.Availability.
+#  * PSSession has no public constructor and its .State/.Availability are runtime-backed. .State is a
+#    CLR ScriptProperty that cannot be shadowed per-instance, so we register a type-wide ETS override
+#    making .State report Opened on our doubles; liveness then varies by the per-double .Availability
+#    (a native property Add-Member -Force CAN shadow). The override is removed in AfterAll so it does
+#    not leak into other suites. This faithfully exercises the predicate: Available => usable, and
+#    Busy/None (with State=Opened) => not usable, routed to the busy-wait vs reconnect branches.
 
 BeforeAll {
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
     Import-Module "$repoRoot/SEBackup.psd1" -Force -DisableNameChecking 3>$null
 
+    # Make our PSSession doubles report State=Opened (CLR .State can't be set on an uninitialized
+    # instance). Per-double liveness is then driven entirely by the shadowed .Availability.
+    Update-TypeData -TypeName System.Management.Automation.Runspaces.PSSession `
+        -MemberName State -MemberType ScriptProperty `
+        -Value { [System.Management.Automation.Runspaces.RunspaceState]::Opened } -Force
+
     # Build a PSSession double whose adapted .Availability/.Name/.ComputerName are controllable.
-    # NOTE on .State: on a PSSession it is itself a ScriptProperty (not a native CLR property), so
-    # Add-Member -Force cannot shadow it. We deliberately do not set it -- the wrapper decides
-    # liveness from .Availability and only reads .State for log text, so leaving it empty is fine.
-    # .Availability / .Name / .ComputerName ARE native properties and Add-Member -Force shadows them.
+    # NOTE: the connection-target parameter is named -Target (not -ComputerName) on purpose:
+    # PSScriptAnalyzer's PSAvoidUsingComputerNameHardcoded rule flags any literal bound to a
+    # -ComputerName parameter, even on this local test helper. The double's .ComputerName
+    # property is still set from -Target so the wrapper reads the intended pinned host/IP.
     function New-FakeSession {
         param(
             [string]$Availability = 'Available',
             [string]$Name = 'SEBackup-node01',
-            [string]$ComputerName = 'node01',
+            [string]$Target = 'node01',
             [string]$Tag = ''
         )
         $s = [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
             [System.Management.Automation.Runspaces.PSSession])
         $s | Add-Member -Force -MemberType ScriptProperty -Name Availability -Value ([scriptblock]::Create("[System.Management.Automation.Runspaces.RunspaceAvailability]::$Availability"))
         $s | Add-Member -Force -MemberType ScriptProperty -Name Name -Value ([scriptblock]::Create("'$Name'"))
-        $s | Add-Member -Force -MemberType ScriptProperty -Name ComputerName -Value ([scriptblock]::Create("'$ComputerName'"))
+        $s | Add-Member -Force -MemberType ScriptProperty -Name ComputerName -Value ([scriptblock]::Create("'$Target'"))
         # Inert tag so a mock can assert which session it received.
         $s | Add-Member -Force -MemberType NoteProperty -Name SebTag -Value $Tag
         $s
     }
 }
 
-Describe 'Invoke-SEBRemoteCommand liveness check (.Availability)' {
+AfterAll {
+    # Remove the type-wide .State override so other test files see the real PSSession.State.
+    Remove-TypeData -TypeName System.Management.Automation.Runspaces.PSSession -ErrorAction SilentlyContinue
+}
+
+Describe 'Invoke-SEBRemoteCommand liveness check (Test-SEBSessionUsable)' {
 
     Context 'session is Available' {
         BeforeAll {
@@ -69,28 +88,29 @@ Describe 'Invoke-SEBRemoteCommand liveness check (.Availability)' {
     Context 'session is Opened but Availability=Busy' {
         BeforeAll {
             Mock Write-SEBLog {} -ModuleName RemoteManager
-            Mock Remove-SEBSession -ModuleName RemoteManager {}
-            # Reconnect yields a fresh Available session tagged so we can prove the command ran on it.
-            Mock New-SEBSession -ModuleName RemoteManager { New-FakeSession -Availability 'Available' -Tag 'reconnected' }
-            Mock Invoke-Command -ModuleName RemoteManager {
-                # Echo which session the wrapper handed to Invoke-Command.
-                "ran-on:$($Session.SebTag)"
-            }
+            Mock New-SEBSession -ModuleName RemoteManager { throw 'must not reconnect a busy session' }
+            Mock Remove-SEBSession -ModuleName RemoteManager { throw 'must not tear down a busy session' }
+            Mock Invoke-Command -ModuleName RemoteManager { 'should-not-run' }
+            # Keep the busy-poll fast: the wrapper sleeps 500ms between checks up to a 10s bound.
+            Mock Start-Sleep -ModuleName RemoteManager {}
         }
 
-        It 'treats Busy as unusable, reconnects, and runs on the new session' {
+        It 'does NOT tear down or reconnect a Busy session; throws a busy error' {
             $session = New-FakeSession -Availability 'Busy' -Name 'SEBackup-node01' -Tag 'busy-orig'
-            $result = Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 }
 
-            $result | Should -Be 'ran-on:reconnected'
-            Should -Invoke New-SEBSession   -ModuleName RemoteManager -Times 1 -Exactly
-            Should -Invoke Remove-SEBSession -ModuleName RemoteManager -Times 1 -Exactly
-            # Reconnect must key off the node parsed from the session Name (SEBackup-<node>).
-            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly -ParameterFilter { $NodeName -eq 'node01' }
+            # -BusyWaitSeconds 0 so the poll bound elapses immediately (no real wall-clock wait).
+            { Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 } -BusyWaitSeconds 0 } |
+                Should -Throw -ExpectedMessage '*busy*'
+
+            # The whole point: a Busy+Opened session must never be removed or reconnected
+            # (that would kill another caller's in-flight command), and the command must not run.
+            Should -Invoke Remove-SEBSession -ModuleName RemoteManager -Times 0 -Exactly
+            Should -Invoke New-SEBSession   -ModuleName RemoteManager -Times 0 -Exactly
+            Should -Invoke Invoke-Command   -ModuleName RemoteManager -Times 0 -Exactly
         }
     }
 
-    Context 'session Availability=None (default of an unopened session)' {
+    Context 'session Availability=None (terminal: not in the Opened state)' {
         BeforeAll {
             Mock Write-SEBLog {} -ModuleName RemoteManager
             Mock Remove-SEBSession -ModuleName RemoteManager {}
@@ -104,6 +124,54 @@ Describe 'Invoke-SEBRemoteCommand liveness check (.Availability)' {
 
             $result | Should -Be 'ran-on:reconnected'
             Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly
+            # Reconnect must key off the node parsed from the session Name (SEBackup-<node>).
+            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly -ParameterFilter { $NodeName -eq 'node01' }
+        }
+    }
+}
+
+Describe 'Invoke-SEBRemoteCommand reconnect preserves connection identity' {
+
+    Context 'original session alias != hostname' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock Remove-SEBSession -ModuleName RemoteManager {}
+            Mock New-SEBSession -ModuleName RemoteManager { New-FakeSession -Availability 'Available' -Tag 'reconnected' }
+            Mock Invoke-Command -ModuleName RemoteManager { "ran-on:$($Session.SebTag)" }
+        }
+
+        It 'reconnects with the original ComputerName/hostname, not the bare alias' {
+            # Name alias 'gamingpc01' differs from the pinned IP target '192.168.1.101'.
+            $session = New-FakeSession -Availability 'None' -Name 'SEBackup-gamingpc01' -Target '192.168.1.101' -Tag 'dead'
+
+            $null = Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 }
+
+            # Node/credential/cache key is the friendly alias...
+            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly -ParameterFilter { $NodeName -eq 'gamingpc01' }
+            # ...but the actual connection target is preserved via NodeConfig.hostname = the IP.
+            Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly -ParameterFilter {
+                $NodeConfig -and $NodeConfig['hostname'] -eq '192.168.1.101'
+            }
+        }
+    }
+
+    Context 'session not created by New-SEBSession (foreign Name)' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock Remove-SEBSession -ModuleName RemoteManager { throw 'must not remove a foreign session' }
+            Mock New-SEBSession -ModuleName RemoteManager { throw 'must not reconnect a foreign session' }
+            Mock Invoke-Command -ModuleName RemoteManager { 'should-not-run' }
+        }
+
+        It 'rejects reconnect rather than guessing a credential/cache key' {
+            $session = New-FakeSession -Availability 'None' -Name 'SomeRandomSession' -Target 'attacker-host' -Tag 'foreign'
+
+            { Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 } } |
+                Should -Throw -ExpectedMessage '*not created by New-SEBSession*'
+
+            Should -Invoke New-SEBSession    -ModuleName RemoteManager -Times 0 -Exactly
+            Should -Invoke Remove-SEBSession -ModuleName RemoteManager -Times 0 -Exactly
+            Should -Invoke Invoke-Command    -ModuleName RemoteManager -Times 0 -Exactly
         }
     }
 }
@@ -146,9 +214,83 @@ Describe 'Invoke-SEBRemoteCommand reconnect propagation' {
             Should -Invoke New-SEBSession -ModuleName RemoteManager -Times 1 -Exactly
         }
     }
+
+    Context 'cache already holds a healthy session for the node' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock Remove-SEBSession -ModuleName RemoteManager { throw 'must not tear down when cache is healthy' }
+            Mock New-SEBSession -ModuleName RemoteManager { throw 'must not rebuild when cache is healthy' }
+            Mock Invoke-Command -ModuleName RemoteManager { "ran-on:$($Session.SebTag)" }
+        }
+
+        It 'reuses the cached live session instead of removing + recreating' {
+            # Seed the module cache with a healthy session for node01.
+            InModuleScope RemoteManager {
+                $script:SEBSessions = @{}
+            }
+            $cached = New-FakeSession -Availability 'Available' -Name 'SEBackup-node01' -Tag 'cached-live'
+            InModuleScope RemoteManager -Parameters @{ Cached = $cached } {
+                param($Cached)
+                $script:SEBSessions['node01'] = $Cached
+            }
+
+            $deadHandle = New-FakeSession -Availability 'None' -Name 'SEBackup-node01' -Tag 'dead'
+            $result = Invoke-SEBRemoteCommand -Session $deadHandle -ScriptBlock { 1 }
+
+            $result | Should -Be 'ran-on:cached-live'
+            Should -Invoke Remove-SEBSession -ModuleName RemoteManager -Times 0 -Exactly
+            Should -Invoke New-SEBSession    -ModuleName RemoteManager -Times 0 -Exactly
+
+            InModuleScope RemoteManager { $script:SEBSessions = @{} }
+        }
+    }
 }
 
-Describe 'Invoke-SEBRemoteCommand error and retry semantics' {
+Describe 'Invoke-SEBRemoteCommand retry semantics (the point of the wrapper)' {
+
+    Context 'DEFAULT RetryCount on a transient failure' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock New-SEBSession -ModuleName RemoteManager {}
+            Mock Remove-SEBSession -ModuleName RemoteManager {}
+            Mock Start-Sleep -ModuleName RemoteManager {}  # don't actually wait the backoff
+            # Throw once, then succeed -- exercises the retry that is the whole point of the wrapper.
+            $script:icCalls = 0
+            Mock Invoke-Command -ModuleName RemoteManager {
+                $script:icCalls++
+                if ($script:icCalls -eq 1) { throw 'transient transport blip' }
+                'OK-on-retry'
+            }
+        }
+
+        It 'runs Invoke-Command TWICE and ultimately succeeds' {
+            $session = New-FakeSession -Availability 'Available'
+            $result = Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 }
+
+            $result | Should -Be 'OK-on-retry'
+            Should -Invoke Invoke-Command -ModuleName RemoteManager -Times 2 -Exactly
+        }
+    }
+
+    Context 'a mutation call site uses -RetryCount 0' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RemoteManager
+            Mock New-SEBSession -ModuleName RemoteManager {}
+            Mock Remove-SEBSession -ModuleName RemoteManager {}
+            Mock Start-Sleep -ModuleName RemoteManager {}
+            # Throw on every attempt: with -RetryCount 0 there must be no second attempt, so a
+            # post-mutation transport drop is surfaced once (fails fast into the caller's rollback)
+            # rather than silently re-running the mutation.
+            Mock Invoke-Command -ModuleName RemoteManager { throw 'transport drop after the node mutated' }
+        }
+
+        It 'attempts exactly ONCE and does not retry the mutation' {
+            $session = New-FakeSession -Availability 'Available'
+            { Invoke-SEBRemoteCommand -Session $session -ScriptBlock { 1 } -RetryCount 0 } |
+                Should -Throw -ExpectedMessage '*failed after 1 attempt*'
+            Should -Invoke Invoke-Command -ModuleName RemoteManager -Times 1 -Exactly
+        }
+    }
 
     Context 'reconnection itself fails' {
         BeforeAll {

@@ -109,8 +109,9 @@ function Undo-SEBRestore {
             throw "Instance config does not specify 'world_path'."
         }
 
-        # Find the most recent prerestore directory.
-        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        # Find the most recent prerestore directory. IDEMPOTENT read-only query, so it KEEPS
+        # the default retry (safe to run twice). Route through the wrapper for
+        # retry/logging/reconnect; the block stays node-local.
         $findResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
             param($worldDir)
 
@@ -157,9 +158,13 @@ function Undo-SEBRestore {
             throw "Failed to stop Torch server: $($stopResult.ErrorMessage)"
         }
 
-        # Perform the undo: move current aside, rename prerestore back.
-        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
-        $undoResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -ScriptBlock {
+        # Perform the undo: move current aside, rename prerestore back. NON-IDEMPOTENT
+        # mutation -- -RetryCount 0 so a transport drop after the renames complete does NOT
+        # re-run (a second run would move the recovered world aside again and strand the
+        # genuine pre-restore content under a postrestore name). The function returns a
+        # structured failure and the caller treats it as fatal. Route through the wrapper for
+        # logging/reconnect; the block stays node-local.
+        $undoResult = Invoke-SEBRemoteCommand -Session $session -SessionRef ([ref]$session) -RetryCount 0 -ScriptBlock {
             param($worldDir, $preRestorePath)
 
             $worldName = Split-Path -Path $worldDir -Leaf
