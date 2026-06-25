@@ -7,14 +7,22 @@
 # so this is enforced as a hard contract across all manifests including the root.
 
 BeforeDiscovery {
+    # Enumerate and parse every manifest exactly once here. The resulting list feeds both
+    # the per-manifest validity test (via -ForEach) and the uniqueness test below, so the
+    # filesystem is walked and each manifest is read a single time.
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
     $script:manifests = @(
         @(Get-ChildItem -Path "$repoRoot/Modules" -Recurse -File -Filter '*.psd1')
         Get-Item -Path "$repoRoot/SEBackup.psd1"
     ) | ForEach-Object {
+        $data = Import-PowerShellDataFile -Path $_.FullName
+        $hasGuid = $data.ContainsKey('GUID')
         @{
-            Path = $_.FullName
-            Name = $_.FullName.Replace($repoRoot, '').TrimStart('\', '/')
+            Path        = $_.FullName
+            Name        = $_.FullName.Replace($repoRoot, '').TrimStart('\', '/')
+            HasGuid     = $hasGuid
+            # Raw declared GUID (may be $null/absent); the validity test asserts it parses.
+            Guid        = if ($hasGuid) { [string]$data.GUID } else { $null }
         }
     }
 }
@@ -23,28 +31,27 @@ Describe 'Module manifest GUIDs' {
 
     Context 'Each manifest has a valid GUID' {
         It 'has a parseable [guid] in <Name>' -ForEach $script:manifests {
-            $data = Import-PowerShellDataFile -Path $Path
-            $data.ContainsKey('GUID') | Should -BeTrue -Because "$Name must declare a GUID"
+            $HasGuid | Should -BeTrue -Because "$Name must declare a GUID"
 
             [guid]$parsed = [guid]::Empty
-            [guid]::TryParse([string]$data.GUID, [ref]$parsed) |
-                Should -BeTrue -Because "the GUID '$($data.GUID)' in $Name must be a valid GUID"
+            [guid]::TryParse($Guid, [ref]$parsed) |
+                Should -BeTrue -Because "the GUID '$Guid' in $Name must be a valid GUID"
         }
     }
 
     Context 'GUIDs are unique across all manifests' {
         It 'has no two manifests sharing a GUID' {
-            $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
-            $files = @(
-                @(Get-ChildItem -Path "$repoRoot/Modules" -Recurse -File -Filter '*.psd1')
-                Get-Item -Path "$repoRoot/SEBackup.psd1"
-            )
-
-            $byGuid = $files | ForEach-Object {
-                $data = Import-PowerShellDataFile -Path $_.FullName
+            # Reuse the single enumeration captured in BeforeDiscovery; do not re-walk the
+            # filesystem or re-parse the manifests. Canonicalize each GUID to a [guid] so two
+            # different textual representations of the same value still count as a collision.
+            $byGuid = $script:manifests | ForEach-Object {
+                [guid]$canonical = [guid]::Empty
+                $parsed = [guid]::TryParse([string]$_.Guid, [ref]$canonical)
                 [pscustomobject]@{
-                    Name = $_.FullName.Replace($repoRoot, '').TrimStart('\', '/')
-                    Guid = ([string]$data.GUID).ToLowerInvariant()
+                    Name = $_.Name
+                    # 'D' is the canonical 8-4-4-4-12 form; fall back to the raw value if a
+                    # GUID is unparseable (the validity test already flags that separately).
+                    Guid = if ($parsed) { $canonical.ToString('D') } else { [string]$_.Guid }
                 }
             } | Group-Object -Property Guid | Where-Object { $_.Count -gt 1 }
 
