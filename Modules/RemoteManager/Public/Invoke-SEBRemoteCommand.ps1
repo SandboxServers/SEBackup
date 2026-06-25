@@ -232,11 +232,14 @@ function Invoke-SEBRemoteCommand {
                     # alias (node alias != hostname is the documented standard deployment).
                     $origComputerName = $Session.ComputerName
 
-                    # If the module cache already holds a usable session for this node (e.g. another
+                    # If the module cache already holds an ALIVE session for this node (e.g. another
                     # call reconnected it), reuse it instead of tearing it down -- closing a live
                     # session and rebuilding wastes a round-trip and can orphan a caller-owned handle.
+                    # Use Test-SEBSessionAlive (not Usable), consistent with New-SEBSession/
+                    # Test-SEBSessionExists: a Busy-but-alive shared session must never be torn down;
+                    # the execution-gate busy-wait below handles it if it is momentarily Busy.
                     $cached = $script:SEBSessions[$sessionNodeName]
-                    if ($cached -and (Test-SEBSessionUsable -Session $cached)) {
+                    if ($cached -and (Test-SEBSessionAlive -Session $cached)) {
                         $Session = $cached
                     }
                     else {
