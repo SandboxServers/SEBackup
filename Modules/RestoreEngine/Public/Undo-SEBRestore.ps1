@@ -45,8 +45,13 @@ function Undo-SEBRestore {
     )
 
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
+    $hasSendNotification = Get-Command -Name 'Send-SEBRestoreNotification' -ErrorAction SilentlyContinue
     $lockAcquired = $false
     $session = $null
+    # Track session ownership: New-SEBSession returns a CACHED session if one
+    # already exists for the node, so we must only tear down a session WE created
+    # -- never one the caller already owned.
+    $sessionCreatedByUs = $false
 
     $result = [PSCustomObject]@{
         Success         = $false
@@ -81,9 +86,17 @@ function Undo-SEBRestore {
             throw "Failed to load node configuration for '$NodeName'."
         }
 
+        # Determine ownership BEFORE creating: if an open session is already cached
+        # for this node, New-SEBSession will hand us that existing one (owned by the
+        # caller) rather than make a new one, so we must not remove it in finally.
+        $sessionPreexisted = Test-SEBSessionExists -NodeName $NodeName
+
         $session = New-SEBSession -NodeName $NodeName -NodeConfig ($nodeConfig.ContainsKey('node') ? $nodeConfig['node'] : $nodeConfig)
         if ($null -eq $session) {
             throw "Failed to create PSSession to node '$NodeName'."
+        }
+        if (-not $sessionPreexisted) {
+            $sessionCreatedByUs = $true
         }
 
         $instanceConfig = Get-SEBInstanceConfig -Session $session -InstanceName $InstanceName
@@ -222,7 +235,7 @@ function Undo-SEBRestore {
         # ====================================================================
         # Send restore notification (best-effort; never blocks the undo).
         # ====================================================================
-        if ((Get-Command -Name 'Send-SEBRestoreNotification' -ErrorAction SilentlyContinue) -and
+        if ($hasSendNotification -and
             $globalConfig -and $globalConfig.notifications -and $globalConfig.notifications.enabled) {
             try {
                 $undoRestorePoint = if ($findResult -and $findResult.Name) { "Undo: $($findResult.Name)" } else { 'Undo' }
@@ -245,9 +258,10 @@ function Undo-SEBRestore {
         }
     }
     finally {
-        # Always tear down the session this function created and release the lock,
-        # even if the undo failed partway through.
-        if ($null -ne $session) {
+        # Always release the lock, even if the undo failed partway through.
+        # Only tear down the session if WE created it -- if it was already cached
+        # for this node, the caller owns it and we must leave it open.
+        if ($sessionCreatedByUs) {
             try {
                 Remove-SEBSession -NodeName $NodeName
             }

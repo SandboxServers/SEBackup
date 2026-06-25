@@ -38,6 +38,26 @@ Remove-SEBSession -NodeName "GameServer01"
 Remove-SEBSession -All
 ```
 
+### Test-SEBSessionExists
+
+Reports whether an OPEN cached session already exists for a node. Use it to
+determine session ownership before calling `New-SEBSession`: if a session
+already exists, `New-SEBSession` returns the cached one (which the caller must
+not tear down); if not, the caller owns the session it creates.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|:--------:|---------|-------------|
+| NodeName | string | Yes | -- | The node name to check the session cache for. |
+
+**Output:** `System.Boolean` -- `$true` if an open cached session exists, else `$false`.
+
+```powershell
+$preexisted = Test-SEBSessionExists -NodeName "GameServer01"
+$session = New-SEBSession -NodeName "GameServer01"
+try { Invoke-Command -Session $session -ScriptBlock { ... } }
+finally { if (-not $preexisted) { Remove-SEBSession -NodeName "GameServer01" } }
+```
+
 ### Test-SEBConnection
 
 Tests whether a PSSession can be established to a compute node. Does not maintain the session -- it is created and immediately removed.

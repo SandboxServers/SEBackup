@@ -36,6 +36,8 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
 
             Mock Get-SEBGlobalConfig -ModuleName RestoreEngine { @{ notifications = @{ enabled = $false } } }
             Mock Get-SEBNodeConfig -ModuleName RestoreEngine { @{ node = @{ hostname = 'node01' } } }
+            # No session was cached before Undo runs, so Undo creates (and thus owns) it.
+            Mock Test-SEBSessionExists -ModuleName RestoreEngine { $false }
             Mock New-SEBSession -ModuleName RestoreEngine {
                 [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
                     [System.Management.Automation.Runspaces.PSSession])
@@ -76,6 +78,8 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
 
             Mock Get-SEBGlobalConfig -ModuleName RestoreEngine { @{ notifications = @{ enabled = $false } } }
             Mock Get-SEBNodeConfig -ModuleName RestoreEngine { @{ node = @{ hostname = 'node01' } } }
+            # No session was cached before Undo runs, so Undo creates (and thus owns) it.
+            Mock Test-SEBSessionExists -ModuleName RestoreEngine { $false }
             Mock New-SEBSession -ModuleName RestoreEngine {
                 [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
                     [System.Management.Automation.Runspaces.PSSession])
@@ -116,6 +120,7 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             # None of these must be reached when the lock cannot be acquired.
             Mock Get-SEBGlobalConfig -ModuleName RestoreEngine { @{ notifications = @{ enabled = $false } } }
             Mock Get-SEBNodeConfig -ModuleName RestoreEngine { @{ node = @{ hostname = 'node01' } } }
+            Mock Test-SEBSessionExists -ModuleName RestoreEngine { $false }
             Mock New-SEBSession -ModuleName RestoreEngine {
                 [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
                     [System.Management.Automation.Runspaces.PSSession])
@@ -139,6 +144,48 @@ Describe 'Undo-SEBRestore locking and session lifecycle' {
             # Did not try to release a lock it never held, nor tear down a session it never made.
             Should -Invoke Remove-SEBLockFile -ModuleName RestoreEngine -Times 0 -Exactly
             Should -Invoke Remove-SEBSession  -ModuleName RestoreEngine -Times 0 -Exactly
+        }
+    }
+
+    Context 'caller already owned a session (preexisting cached session is preserved)' {
+        BeforeAll {
+            Mock Write-SEBLog {} -ModuleName RestoreEngine
+
+            Mock New-SEBLockFile -ModuleName RestoreEngine {
+                [PSCustomObject]@{ Acquired = $true; LockFilePath = 'X:\lock'; Reason = $null; StaleLockBroken = $false }
+            }
+            Mock Remove-SEBLockFile -ModuleName RestoreEngine { $true }
+
+            Mock Get-SEBGlobalConfig -ModuleName RestoreEngine { @{ notifications = @{ enabled = $false } } }
+            Mock Get-SEBNodeConfig -ModuleName RestoreEngine { @{ node = @{ hostname = 'node01' } } }
+            # A session for this node was ALREADY cached before Undo ran. New-SEBSession
+            # therefore hands back the caller's existing session; Undo does NOT own it.
+            Mock Test-SEBSessionExists -ModuleName RestoreEngine { $true }
+            Mock New-SEBSession -ModuleName RestoreEngine {
+                [System.Runtime.Serialization.FormatterServices]::GetUninitializedObject(
+                    [System.Management.Automation.Runspaces.PSSession])
+            }
+            Mock Remove-SEBSession -ModuleName RestoreEngine {}
+            Mock Get-SEBInstanceConfig -ModuleName RestoreEngine { @{ world_path = 'C:\Torch\Instance\Saves\MyWorld' } }
+            Mock Stop-SEBTorchServer -ModuleName RestoreEngine { @{ Stopped = $true; Method = 'service'; ErrorMessage = $null } }
+            Mock Start-SEBTorchServer -ModuleName RestoreEngine { @{ Started = $true; APIResponding = $true; ErrorMessage = $null } }
+
+            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'prerestore_\*' } {
+                @{ Found = $true; Path = 'C:\Torch\Instance\Saves\MyWorld_prerestore_20260101_010101'; Name = 'MyWorld_prerestore_20260101_010101'; Error = $null }
+            }
+            Mock Invoke-Command -ModuleName RestoreEngine -ParameterFilter { $ScriptBlock.ToString() -match 'postrestore' } {
+                @{ Success = $true; PostRestorePath = 'C:\Torch\Instance\Saves\MyWorld_postrestore_20260101_010102'; Error = $null }
+            }
+        }
+
+        It 'succeeds and releases the lock but does NOT tear down the caller-owned session' {
+            $result = Undo-SEBRestore -NodeName 'node01' -InstanceName 'PvPArena'
+
+            $result.Success | Should -BeTrue
+            # The lock is still always released.
+            Should -Invoke Remove-SEBLockFile -ModuleName RestoreEngine -Times 1 -Exactly -ParameterFilter { $InstanceName -eq 'PvPArena' }
+            # But the preexisting session belongs to the caller, so finally must leave it alone.
+            Should -Invoke Remove-SEBSession -ModuleName RestoreEngine -Times 0 -Exactly
         }
     }
 }
