@@ -95,16 +95,64 @@ function Test-SEBChainIntegrity {
             Write-SEBLog -Message "Level 3 chain integrity check: instance=$InstanceName, chain=$ChainId" -Level INFO -Context 'Integrity'
         }
 
-        # --- Step 1: Get the manifest chain ---
-        $chainParams = @{
-            InstanceName = $InstanceName
-            BackupRoot   = $BackupRoot
+        # --- Step 1: Resolve a real target manifest, then get the chain ---
+        # Get-SEBManifestChain walks parent_manifest links backwards from a TARGET manifest;
+        # its real signature is mandatory -InstanceName, -TargetManifest, -BackupRoot. It has
+        # NO -ChainId parameter. So translate this function's optional -ChainId into a concrete
+        # target manifest filename before calling it:
+        #   - No -ChainId: use the latest manifest for the instance (any type).
+        #   - With -ChainId: use the latest manifest belonging to that chain (highest
+        #     chain_sequence, tie-broken by timestamp), preserving the -ChainId behaviour
+        #     advertised by this function while honouring the real downstream signature.
+        $targetManifest = $null
+
+        if ([string]::IsNullOrWhiteSpace($ChainId)) {
+            $latest = Get-SEBLatestManifest -InstanceName $InstanceName -BackupRoot $BackupRoot
+            if ($latest) {
+                $targetManifest = $latest['_source_filename']
+            }
         }
-        if (-not [string]::IsNullOrWhiteSpace($ChainId)) {
-            $chainParams['ChainId'] = $ChainId
+        else {
+            # Find the head (highest chain_sequence) of the requested chain by scanning the
+            # instance's manifest directory. We resolve the directory the same way the
+            # ManifestManager functions do: <BackupRoot>/<InstanceName>/manifests.
+            $manifestDir = Join-Path -Path $BackupRoot -ChildPath $InstanceName | Join-Path -ChildPath 'manifests'
+            if (Test-Path -Path $manifestDir -PathType Container) {
+                $headManifest = $null
+                $headSequence = -1
+                $headTimestamp = [datetime]::MinValue
+                foreach ($file in (Get-ChildItem -Path $manifestDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+                    try {
+                        $candidate = Read-SEBManifest -Path $file.FullName
+                    }
+                    catch {
+                        Write-Verbose "IntegrityManager: skipping unreadable manifest '$($file.Name)': $_"
+                        continue
+                    }
+                    if ($candidate['chain_id'] -ne $ChainId) { continue }
+
+                    $seq = try { [int]$candidate['chain_sequence'] } catch { -1 }
+                    $ts = try { [datetime]::Parse($candidate['timestamp']) } catch { [datetime]::MinValue }
+
+                    if ($seq -gt $headSequence -or ($seq -eq $headSequence -and $ts -gt $headTimestamp)) {
+                        $headSequence = $seq
+                        $headTimestamp = $ts
+                        $headManifest = $candidate
+                    }
+                }
+                if ($headManifest) {
+                    $targetManifest = $headManifest['_source_filename']
+                }
+            }
         }
 
-        $chain = Get-SEBManifestChain @chainParams
+        if ([string]::IsNullOrWhiteSpace($targetManifest)) {
+            $result.ErrorMessage = "No manifest chain found for instance '$InstanceName'" +
+                $(if ($ChainId) { " (chain: $ChainId)" } else { " (latest)" })
+            return $result
+        }
+
+        $chain = Get-SEBManifestChain -InstanceName $InstanceName -TargetManifest $targetManifest -BackupRoot $BackupRoot
 
         if ($null -eq $chain -or $chain.Count -eq 0) {
             $result.ErrorMessage = "No manifest chain found for instance '$InstanceName'" +
@@ -196,8 +244,10 @@ function Test-SEBChainIntegrity {
             return $result
         }
 
-        # Extract the full backup
-        Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir
+        # Extract the full backup. Expand-SEBArchive returns a descriptor object; discard it so
+        # it does not leak into this function's pipeline and turn the single result object into
+        # an array.
+        Expand-SEBArchive -ArchivePath $fullArchivePath -DestinationPath $tempDir | Out-Null
 
         if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
             Write-SEBLog -Message "Extracted full backup: $fullArchivePath" -Level DEBUG -Context 'Integrity'
@@ -219,7 +269,8 @@ function Test-SEBChainIntegrity {
             New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
 
             try {
-                Expand-SEBArchive -ArchivePath $incArchivePath -DestinationPath $stagingDir
+                # Discard the descriptor object so it does not leak into the result pipeline.
+                Expand-SEBArchive -ArchivePath $incArchivePath -DestinationPath $stagingDir | Out-Null
 
                 # Copy modified and new files from staging to reconstruction
                 $stagingFiles = Get-ChildItem -Path $stagingDir -Recurse -File

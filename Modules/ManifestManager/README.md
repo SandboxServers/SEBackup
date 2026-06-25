@@ -39,18 +39,18 @@ Write-Host "Changed: $($diff.AddedCount) added, $($diff.ModifiedCount) modified,
 
 ### Get-SEBManifestChain
 
-Loads the full chain of manifests from the initial full backup (sequence 0) through the specified target manifest, following chain IDs.
+Walks the `parent_manifest` chain backwards from a target manifest down to the full backup (where `parent_manifest` is null), returning the chain in order from the full backup to the target. Throws if any link is missing (broken chain) or if the chain does not start with a full backup.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| ManifestDir | string | Yes | -- | The directory containing manifest JSON files. |
-| ChainId | string | Yes | -- | The chain ID to follow. |
-| TargetSequence | int | No | latest | The maximum chain sequence to include. |
+| InstanceName | string | Yes | -- | The instance whose chain to resolve. Locates the manifests directory under the backup root. |
+| TargetManifest | string | Yes | -- | The filename (not full path) of the manifest to start from -- typically the most recent incremental or the specific backup to restore. |
+| BackupRoot | string | Yes | -- | The backup storage root. Manifests are expected at `{BackupRoot}\{InstanceName}\manifests\`. |
 
-**Output:** `hashtable[]` -- ordered array of manifest hashtables from sequence 0 to the target.
+**Output:** `hashtable[]` -- ordered array of manifest hashtables from the full backup (sequence 0) to the target. Each includes a `_source_filename` key with the manifest filename.
 
 ```powershell
-$chain = Get-SEBManifestChain -ManifestDir $manifestDir -ChainId "abc-123" -TargetSequence 5
+$chain = Get-SEBManifestChain -InstanceName "Survival01" -TargetManifest "20260227_inc_003.json" -BackupRoot "D:\Backups"
 ```
 
 ### Read-SEBManifest
@@ -148,7 +148,8 @@ $diff = Compare-SEBManifest -CurrentManifest $currentManifest -PreviousManifest 
 
 **Scenario 3: Walking a backup chain for restore**
 ```powershell
-$chain = Get-SEBManifestChain -ManifestDir $manifestDir -ChainId $targetManifest.chain_id
+$latest = Get-SEBLatestManifest -InstanceName "Survival01" -BackupRoot $backupRoot
+$chain = Get-SEBManifestChain -InstanceName "Survival01" -TargetManifest $latest['_source_filename'] -BackupRoot $backupRoot
 foreach ($m in $chain) {
     Write-Host "Sequence $($m.chain_sequence): $($m.type), $($m.files.Count) files"
 }
