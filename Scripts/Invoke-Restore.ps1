@@ -134,8 +134,10 @@ catch {
 }
 
 $hostname = $nodeConfig.node.hostname
+# Resolve the backup root the same way the RestoreEngine does. The backup engine writes to
+# {backupRoot}\{InstanceName}\... (NO per-node level), so discovery must use the same root and
+# defer the layout walk to Get-SEBRestorePoints.
 $backupRoot = $globalConfig.storage.cc_backup_root
-$instanceBackupDir = Join-Path $backupRoot "$NodeName\$InstanceName"
 
 # ── Discover available restore points ────────────────────────────────────────
 Write-Host 'Discovering available restore points...' -ForegroundColor Yellow
@@ -144,88 +146,43 @@ Write-Host ''
 $restorePoints = [System.Collections.Generic.List[object]]::new()
 
 try {
-    # Look for manifest files in the backup directory
-    if (Test-Path $instanceBackupDir) {
-        # Exclude '_BAD' artifacts -- a backup renamed '_BAD' failed integrity and must never be
-        # selectable as a restore point.
-        $manifestFiles = Get-ChildItem -Path $instanceBackupDir -Filter '*.manifest.json' -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '_BAD\.' } |
-            Sort-Object -Property LastWriteTime -Descending
-
-        if ($manifestFiles -and $manifestFiles.Count -gt 0) {
-            $index = 0
-            foreach ($mf in $manifestFiles) {
-                $index++
-                $manifestData = $null
-
-                # Try to read and parse manifest
-                try {
-                    if (Get-Command -Name 'Read-SEBManifest' -ErrorAction SilentlyContinue) {
-                        $manifestData = Read-SEBManifest -Path $mf.FullName
-                    }
-                    else {
-                        $manifestData = Get-Content -Path $mf.FullName -Raw | ConvertFrom-Json
-                    }
-                }
-                catch {
-                    Write-Verbose "Could not parse manifest $($mf.Name): $_"
-                }
-
-                $backupType = 'Unknown'
-                $fileCount = 0
-                $sizeBytes = 0
-                $timestamp = $mf.LastWriteTime
-
-                if ($manifestData) {
-                    if ($manifestData.backup_type) { $backupType = $manifestData.backup_type }
-                    if ($manifestData.BackupType) { $backupType = $manifestData.BackupType }
-                    if ($manifestData.file_count) { $fileCount = $manifestData.file_count }
-                    if ($manifestData.FileCount) { $fileCount = $manifestData.FileCount }
-                    if ($manifestData.total_size_bytes) { $sizeBytes = $manifestData.total_size_bytes }
-                    if ($manifestData.TotalSizeBytes) { $sizeBytes = $manifestData.TotalSizeBytes }
-                    if ($manifestData.timestamp) { $timestamp = [datetime]$manifestData.timestamp }
-                    if ($manifestData.Timestamp) { $timestamp = [datetime]$manifestData.Timestamp }
-                }
-
-                $sizeMB = [math]::Round($sizeBytes / 1MB, 2)
-                $pointId = $mf.BaseName -replace '\.manifest$', ''
-
-                $restorePoints.Add([PSCustomObject]@{
-                    Index        = $index
-                    PointId      = $pointId
-                    # The exact manifest filename (incl. extension). Invoke-SEBRestore ->
-                    # Test-SEBRestoreChain resolves -RestorePoint as a filename in the manifests
-                    # dir without appending an extension, so the call site must pass this, not the
-                    # extension-stripped PointId.
-                    ManifestName = $mf.Name
-                    Date         = $timestamp.ToString('yyyy-MM-dd HH:mm:ss')
-                    Type         = $backupType
-                    Files        = $fileCount
-                    SizeMB       = $sizeMB
-                    ManifestPath = $mf.FullName
-                })
-            }
-        }
+    # Use the RestoreEngine's authoritative discovery. It walks the real on-disk layout
+    # ({backupRoot}\{InstanceName}\manifests\*.json with matching archives under full\ /
+    # incremental\), validates each backup chain, and already excludes '_BAD' artifacts (a backup
+    # renamed '_BAD' failed integrity and must never be offered as a restore point). The previous
+    # bespoke walk searched {backupRoot}\{NodeName}\{InstanceName}\*.manifest.json -- an extra
+    # NodeName level AND the wrong extension -- so it found zero points against real backups.
+    if (-not (Get-Command -Name 'Get-SEBRestorePoints' -ErrorAction SilentlyContinue)) {
+        throw 'RestoreEngine (Get-SEBRestorePoints) is not available; cannot discover restore points.'
     }
 
-    # Also check for archive files without manifests
-    if (Test-Path $instanceBackupDir) {
-        $archiveFiles = Get-ChildItem -Path $instanceBackupDir -Include '*.7z', '*.zip' -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '_BAD\.' -and $_.BaseName -notin ($restorePoints | ForEach-Object { $_.PointId }) } |
-            Sort-Object -Property LastWriteTime -Descending
+    $enginePoints = Get-SEBRestorePoints -InstanceName $InstanceName -BackupRoot $backupRoot
 
-        foreach ($af in $archiveFiles) {
-            $restorePoints.Add([PSCustomObject]@{
-                Index        = $restorePoints.Count + 1
-                PointId      = $af.BaseName
-                ManifestName = $af.Name
-                Date         = $af.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
-                Type         = 'Archive'
-                Files        = 0
-                SizeMB       = [math]::Round($af.Length / 1MB, 2)
-                ManifestPath = $af.FullName
-            })
+    $index = 0
+    foreach ($ep in $enginePoints) {
+        $index++
+
+        # Format the timestamp (manifests store ISO 8601 UTC). Fall back to the raw value if it
+        # does not parse so a point is never silently dropped from the list.
+        $dateDisplay = "$($ep.Timestamp)"
+        $parsedDate = [datetime]::MinValue
+        if ([datetime]::TryParse([string]$ep.Timestamp, [ref]$parsedDate)) {
+            $dateDisplay = $parsedDate.ToString('yyyy-MM-dd HH:mm:ss')
         }
+
+        $restorePoints.Add([PSCustomObject]@{
+            Index        = $index
+            # The exact manifest filename (incl. extension). Invoke-SEBRestore ->
+            # Test-SEBRestoreChain resolves -RestorePoint as a filename in the manifests dir
+            # without appending an extension, so the call site must pass this leaf name.
+            ManifestName = (Split-Path -Path $ep.ManifestFile -Leaf)
+            PointId      = ((Split-Path -Path $ep.ManifestFile -Leaf) -replace '\.json$', '')
+            Date         = $dateDisplay
+            Type         = $ep.Type
+            SizeMB       = [math]::Round([double]$ep.SizeBytes / 1MB, 2)
+            ChainValid   = $ep.ChainValid
+            ManifestPath = $ep.ManifestFile
+        })
     }
 }
 catch {
@@ -234,7 +191,7 @@ catch {
 
 if ($restorePoints.Count -eq 0) {
     Write-Host '  No restore points found.' -ForegroundColor Red
-    Write-Host "  Backup directory: $instanceBackupDir" -ForegroundColor DarkGray
+    Write-Host "  Backup directory: $(Join-Path $backupRoot $InstanceName)" -ForegroundColor DarkGray
     Write-Host ''
     return
 }
@@ -247,8 +204,8 @@ $formatTable = @(
     @{ Label = '#';      Width = 4;  Property = 'Index' }
     @{ Label = 'Date';   Width = 20; Property = 'Date' }
     @{ Label = 'Type';   Width = 14; Property = 'Type' }
-    @{ Label = 'Files';  Width = 7;  Property = 'Files' }
     @{ Label = 'Size MB'; Width = 10; Property = 'SizeMB' }
+    @{ Label = 'Chain OK'; Width = 9; Property = 'ChainValid' }
     @{ Label = 'Restore Point ID'; Width = 40; Property = 'PointId' }
 )
 
@@ -411,7 +368,7 @@ try {
             Write-Host '  [PASS] World save restored successfully.' -ForegroundColor Green
         }
         else {
-            $errorMsg = if ($restoreResult -and $restoreResult.Error) { $restoreResult.Error } else { 'Unknown error' }
+            $errorMsg = if ($restoreResult -and $restoreResult.ErrorMessage) { $restoreResult.ErrorMessage } else { 'Unknown error' }
             throw "Restore operation failed: $errorMsg"
         }
     }
@@ -425,7 +382,11 @@ try {
     Write-Host '[4/4] Verifying restore...' -ForegroundColor Yellow
     try {
         $instanceConfig = Get-SEBInstanceConfig -Session $session -InstanceName $InstanceName
-        $worldPath = $instanceConfig.paths.world_save
+        # Read the CANONICAL flat key. The engine (Invoke-SEBRestore) and Test-SEBPreFlight both
+        # read $instanceConfig['world_path']; the legacy nested 'paths.world_save' key does not
+        # exist on real instance configs, so this verification block was passing $null as the
+        # world path and the remote Test-Path checks always reported "could not verify".
+        $worldPath = $instanceConfig['world_path']
 
         $verifyResult = Invoke-Command -Session $session -ScriptBlock {
             param($WorldPath)
