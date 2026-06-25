@@ -49,7 +49,11 @@ function Remove-SEBShadowCopy {
     Write-Verbose "VSSManager: Removing shadow copy $ShadowID on $($Session.ComputerName)"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # VSS lifecycle write (deletes the shadow copy via Win32_ShadowCopy), run from cleanup.
+        # -RetryCount 0: single-shot teardown -- a transport drop after Remove-CimInstance must
+        # not trigger a retry+backoff (the block already treats a not-found shadow as handled).
+        # Route through the wrapper for logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
             param($TargetShadowID)
 
             try {

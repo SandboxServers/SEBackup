@@ -60,7 +60,11 @@ function Mount-SEBShadowCopy {
     Write-Verbose "VSSManager: Mounting shadow copy to $MountPoint on $($Session.ComputerName)"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # NON-IDEMPOTENT write (creates a directory symlink mount). -RetryCount 0 so a
+        # transport drop after the mklink succeeds does NOT re-run -- the second attempt's
+        # mklink would fail on the now-existing mount point and report a false failure. Route
+        # through the wrapper for logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
             param($Device, $Mount)
 
             try {

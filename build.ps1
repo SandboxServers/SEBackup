@@ -95,7 +95,7 @@ Write-Host '== PSScriptAnalyzer (Error + ParseError) =='
 $pssaBaseline = @(
     # Setup-Node.ps1 converts a plaintext password to a SecureString to create the node
     # service account (New-LocalUser) over PSRemoting. Hardening tracked under issue #30.
-    'PSAvoidUsingConvertToSecureStringWithPlainText|Scripts/Setup-Node.ps1|224'
+    'PSAvoidUsingConvertToSecureStringWithPlainText|Scripts/Setup-Node.ps1|229'
 )
 
 # Include ParseError: a file that doesn't parse emits ParseError findings (NOT Error), so an

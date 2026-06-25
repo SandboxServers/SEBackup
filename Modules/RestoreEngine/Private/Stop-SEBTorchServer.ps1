@@ -70,7 +70,11 @@ function Stop-SEBTorchServer {
         }
 
         try {
-            $stopResult = Invoke-Command -Session $Session -ScriptBlock {
+            # NON-IDEMPOTENT service control (Stop-Service + WaitForStatus). -RetryCount 0 so a
+            # transport drop after the stop was issued does NOT re-issue it on a retry; the block
+            # already treats an already-Stopped service as success, and the caller treats a
+            # non-stopped result as fatal. Route through the wrapper for logging/reconnect.
+            $stopResult = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
                 param($svcName, $timeout)
 
                 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -178,11 +182,23 @@ function Stop-SEBTorchServer {
                         $procDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
                         $processExited = $false
                         while ((Get-Date) -lt $procDeadline) {
-                            $stillRunning = Invoke-Command -Session $Session -ScriptBlock {
+                            # Raw Invoke-Command (not the wrapper): this is a tight -EA SilentlyContinue
+                            # poll loop that must SWALLOW transient errors and keep polling. The wrapper
+                            # would instead add its own retry/backoff and THROW on exhaustion, breaking
+                            # the loop's swallow-and-continue contract.
+                            #
+                            # The block returns a SENTINEL @{ Ok; Running } so we can tell a successful
+                            # query (Ok=$true) apart from a remote-query failure. A swallowed failure
+                            # returns $null here -- we must NOT read that as "process gone" (the old
+                            # [bool] form did exactly that, letting a dead session masquerade as a
+                            # stopped server and corrupt the world on deploy). On a failed query we keep
+                            # polling; if it never succeeds with Running=$false, $processExited stays
+                            # $false and we fall through to the "refusing to proceed" guard below.
+                            $probe = Invoke-Command -Session $Session -ScriptBlock {
                                 param($name)
-                                [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)
+                                @{ Ok = $true; Running = [bool](Get-Process -Name $name -ErrorAction SilentlyContinue) }
                             } -ArgumentList $procName -ErrorAction SilentlyContinue
-                            if (-not $stillRunning) { $processExited = $true; break }
+                            if ($probe -and $probe.Ok -and -not $probe.Running) { $processExited = $true; break }
                             Start-Sleep -Seconds 2
                         }
 

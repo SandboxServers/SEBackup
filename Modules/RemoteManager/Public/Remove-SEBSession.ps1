@@ -57,6 +57,7 @@ function Remove-SEBSession {
                 Write-Warning "Failed to cleanly remove session for node '$name': $_"
             }
             $script:SEBSessions.Remove($name)
+            $script:SEBSessionHosts.Remove($name)
         }
 
         if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
@@ -79,6 +80,7 @@ function Remove-SEBSession {
             Write-Warning "Failed to cleanly remove session for node '$NodeName': $_"
         }
         $script:SEBSessions.Remove($NodeName)
+        $script:SEBSessionHosts.Remove($NodeName)
 
         if (Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue) {
             Write-SEBLog -Message "Removed PSSession for node '$NodeName'" -Level INFO

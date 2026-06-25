@@ -61,7 +61,14 @@ function Deploy-SEBRestoredFiles {
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
 
     try {
-        $deployResult = Invoke-Command -Session $Session -ScriptBlock {
+        # NON-IDEMPOTENT mutation (renames the live world aside, then robocopies the
+        # reconstruction in). -RetryCount 0 so a transport drop AFTER the node has mutated
+        # does NOT silently re-run this block (a second run would rename the just-deployed
+        # world to a SECOND _prerestore_ dir and corrupt the world / confuse Undo). A failure
+        # surfaces to the caller's 'throw "Deployment failed..."' and the prerestore/rollback
+        # machinery, which is the correct owner of recovery. Route through the wrapper only
+        # for the logging/reconnect; the block stays node-local.
+        $deployResult = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
             param($src, $worldDir)
 
             $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'

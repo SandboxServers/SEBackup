@@ -74,7 +74,11 @@ function Start-SEBTorchServer {
         }
 
         try {
-            $startResult = Invoke-Command -Session $Session -ScriptBlock {
+            # NON-IDEMPOTENT service control (Start-Service + WaitForStatus). -RetryCount 0 so a
+            # transport drop after the start was issued does NOT re-issue it on a retry; the block
+            # already treats an already-Running service as success. Route through the wrapper for
+            # logging/reconnect; the block stays node-local.
+            $startResult = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
                 param($svcName, $timeout)
 
                 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue

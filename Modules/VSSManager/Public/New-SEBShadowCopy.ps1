@@ -58,7 +58,13 @@ function New-SEBShadowCopy {
     Write-Verbose "VSSManager: Creating shadow copy on $($Session.ComputerName) for volume $Volume"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # NON-IDEMPOTENT write (Win32_ShadowCopy Create). -RetryCount 0 so a transport drop
+        # AFTER Create succeeds on the node but before the result returns does NOT re-run
+        # Create -- a retry would produce a SECOND shadow copy whose ID this function never
+        # returns, orphaning it (the lifecycle finally removes only the ID it got back). On a
+        # transport failure the caller sees the existing $null return and aborts. Route through
+        # the wrapper for logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -RetryCount 0 -ScriptBlock {
             param($TargetVolume)
 
             try {

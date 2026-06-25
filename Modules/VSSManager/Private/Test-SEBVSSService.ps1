@@ -46,7 +46,8 @@ function Test-SEBVSSService {
     Write-Verbose "VSSManager: Testing VSS service on $($Session.ComputerName) for volume $Volume"
 
     try {
-        $result = Invoke-Command -Session $Session -ScriptBlock {
+        # Route through the wrapper for retry/logging/reconnect; the block stays node-local.
+        $result = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
             param($TestVolume)
 
             try {

@@ -78,8 +78,9 @@ function New-SEBManifest {
         $previousFiles = $PreviousManifest['files']
     }
 
-    # Remote scan and hash computation
-    $remoteResult = Invoke-Command -Session $Session -ScriptBlock {
+    # Remote scan and hash computation. Route through the wrapper for retry/logging/reconnect;
+    # the block stays node-local (all file I/O and hashing happen on the node).
+    $remoteResult = Invoke-SEBRemoteCommand -Session $Session -ScriptBlock {
         param(
             [string]$ScanPath,
             [string[]]$Excludes,
