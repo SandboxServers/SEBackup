@@ -224,4 +224,50 @@ Describe 'Remove-SEBExpiredBackups Tier-2 unparseable full name (#8)' {
         }
         finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    It 'an unparseable full sorting into the keep window does not consume a keep slot' {
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sebret_" + [guid]::NewGuid().ToString('n'))
+        $cc = Join-Path $root 'cc'
+        $inst = 'Survival'
+        $ccDir = Join-Path $cc $inst
+        $ccFull = Join-Path $ccDir 'full'
+        $ccInc = Join-Path $ccDir 'incremental'
+        $ccManifests = Join-Path $ccDir 'manifests'
+        New-Item -Path $ccFull, $ccInc, $ccManifests -ItemType Directory -Force | Out-Null
+        try {
+            $chainKeep = [guid]::NewGuid().ToString()
+            $chainExp  = [guid]::NewGuid().ToString()
+            New-Manifest -Dir $ccManifests -Name 'Survival_FULL_20260301_000000.json' -Type 'full'        -ChainId $chainKeep -Seq 0
+            New-Manifest -Dir $ccManifests -Name 'Survival_INC_20260302_000000.json'  -Type 'incremental' -ChainId $chainKeep -Seq 1
+            New-Manifest -Dir $ccManifests -Name 'Survival_FULL_20260101_000000.json' -Type 'full'        -ChainId $chainExp  -Seq 0
+
+            $keepFull  = Join-Path $ccFull 'Survival_FULL_20260301_000000.7z'
+            $expFull   = Join-Path $ccFull 'Survival_FULL_20260101_000000.7z'
+            # Letters sort AFTER digits, so this unparseable name sorts FIRST (descending) -- i.e.
+            # straight into the keep window. Pre-fix it would consume the single keep slot and the
+            # newest VALID full would be pushed into the expired set and wrongly pruned.
+            $strayFull = Join-Path $ccFull 'Survival_FULL_zzcorrupt.7z'
+            Set-Content -LiteralPath $keepFull  -Value 'k' -NoNewline
+            Set-Content -LiteralPath $expFull   -Value 'e' -NoNewline
+            Set-Content -LiteralPath $strayFull -Value 's' -NoNewline
+            $keepInc = Join-Path $ccInc 'Survival_INC_20260302_000000.7z'
+            Set-Content -LiteralPath $keepInc -Value 'k' -NoNewline
+
+            $config = @{
+                storage   = @{ cc_backup_root = $cc; nas_backup_path = $null }
+                retention = @{ cc_full_count = 1; nas_retention_days = 30 }
+            }
+            $result = Remove-SEBExpiredBackups -InstanceName $inst -GlobalConfig $config
+
+            ($result.Errors -join "`n") | Should -Match 'unparseable'
+            # Decisive: the newest VALID full (and its chain) is retained because the unparseable
+            # name was filtered out BEFORE the keep count, so it never consumed a keep slot.
+            Test-Path -LiteralPath $keepFull | Should -BeTrue -Because "the unparseable name must not consume the keep slot"
+            Test-Path -LiteralPath $keepInc  | Should -BeTrue
+            # The genuinely-oldest valid full is the one that expires; the stray is preserved.
+            Test-Path -LiteralPath $expFull   | Should -BeFalse
+            Test-Path -LiteralPath $strayFull | Should -BeTrue
+        }
+        finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
