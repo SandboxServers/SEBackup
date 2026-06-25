@@ -405,6 +405,32 @@ Describe 'ConvertFrom-SEBProtectedCredential honors the envelope Version/Scope d
         }
     }
 
+    It 'rejects a missing/null Scope (mandatory, not optional) so a malformed envelope cannot decrypt unproven' {
+        # Copilot R3: a missing/null Scope previously PASSED validation, letting a malformed
+        # (or hand-crafted) envelope be decrypted without proving which backend sealed it. Scope
+        # is now mandatory: removing it must REJECT (return $null), exactly like an unknown scope.
+        InModuleScope CredentialManager {
+            $secure = ConvertTo-SecureString 'ScopeMissing!1' -AsPlainText -Force
+            # The writer returns a hashtable; drop the Scope key so the field is genuinely absent.
+            $env = ConvertTo-SEBProtectedCredential -Credential ([System.Management.Automation.PSCredential]::new('u', $secure))
+            $env.Remove('Scope')
+            $env.ContainsKey('Scope') | Should -BeFalse   # guard: the field really is gone
+            (ConvertFrom-SEBProtectedCredential -Envelope $env 3>$null) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'rejects a missing/null Version (mandatory, not optional)' {
+        # Same "must be present" rigor for Version: an absent Version must not fall through to the
+        # v1 decode path. (The production check already rejects $null Version; this pins it.)
+        InModuleScope CredentialManager {
+            $secure = ConvertTo-SecureString 'VersionMissing!1' -AsPlainText -Force
+            $env = ConvertTo-SEBProtectedCredential -Credential ([System.Management.Automation.PSCredential]::new('u', $secure))
+            $env.Remove('Version')
+            $env.ContainsKey('Version') | Should -BeFalse
+            (ConvertFrom-SEBProtectedCredential -Envelope $env 3>$null) | Should -BeNullOrEmpty
+        }
+    }
+
     It 'still decodes a current (Version=1, Scope=LocalMachine) envelope' {
         InModuleScope CredentialManager {
             $secure = ConvertTo-SecureString 'GoodEnvelope!1' -AsPlainText -Force
@@ -623,12 +649,14 @@ Describe 'Migration mutex unavailable -- fail-safe read-only path keeps the lega
             # Wait until the holder runspace is ready (owns the mutex, or could not create it).
             $holderReady.Wait([TimeSpan]::FromSeconds(30)) | Should -BeTrue
 
-            # If contention is real, the production wait is 30s before the fail-safe returns;
-            # if the mutex could not be created at all, it returns immediately. Either path is
-            # deterministic and yields the SAME result.
+            # If contention is real, the function waits -MutexTimeoutMs before the fail-safe
+            # returns; if the mutex could not be created at all, it returns immediately. Either
+            # path is deterministic and yields the SAME result. We pass a SMALL timeout (500 ms)
+            # so this honest end-to-end test exercises the real contended-timeout branch FAST --
+            # production keeps the 30 s default; only this test shortens it.
             $result = InModuleScope CredentialManager -Parameters @{ node = $script:munode } {
                 param($node)
-                Convert-SEBLegacyCredential -NodeName $node -SaveAction { param([PSCredential]$c) $true } 3>$null
+                Convert-SEBLegacyCredential -NodeName $node -MutexTimeoutMs 500 -SaveAction { param([PSCredential]$c) $true } 3>$null
             }
             $result.Status | Should -Be 'NotReadable'
             $result.Credential | Should -BeOfType ([System.Management.Automation.PSCredential])

@@ -55,6 +55,13 @@ function Convert-SEBLegacyCredential {
         dependency and to keep all writing logic in one place. Must return $true on
         success.
 
+    .PARAMETER MutexTimeoutMs
+        How long (in milliseconds) to wait to acquire the cross-process migration
+        mutex before giving up and routing to the read-only fail-safe. Defaults to
+        30000 (30 s), which preserves production behaviour. It is parameterized so
+        the contended-timeout path can be exercised quickly in tests (e.g. 500 ms)
+        without the suite paying the full 30 s real wait.
+
     .OUTPUTS
         System.Collections.Hashtable
         @{ Status = 'Migrated' | 'NotReadable' | 'None'; Credential = <PSCredential or $null> }
@@ -73,7 +80,11 @@ function Convert-SEBLegacyCredential {
 
         [Parameter(Mandatory, Position = 1)]
         [ValidateNotNull()]
-        [scriptblock]$SaveAction
+        [scriptblock]$SaveAction,
+
+        [Parameter()]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MutexTimeoutMs = 30000
     )
 
     $legacyFile = Resolve-CredentialPath -NodeName $NodeName -Legacy
@@ -109,7 +120,7 @@ function Convert-SEBLegacyCredential {
         }
 
         try {
-            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+            $acquired = $mutex.WaitOne([TimeSpan]::FromMilliseconds($MutexTimeoutMs))
         }
         catch [System.Threading.AbandonedMutexException] {
             # A previous holder crashed; we now own it. Safe to proceed.

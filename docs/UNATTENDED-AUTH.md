@@ -236,3 +236,16 @@ S4U "run whether logged on or not" scheduled task on the C&C host decrypts a
 stored credential and authenticates to a real compute node. That requires a
 registered task and a reachable node and cannot be exercised in a single-host unit
 test; LocalMachine scope + the ACL are asserted here as the proxy.
+
+### Outstanding acceptance item (issue #27)
+
+The issue-#27 acceptance criterion **"a scheduled task authenticates to the test
+node end-to-end" is NOT yet verified by this PR.** It is only *proxy-validated* on
+the build host: the credential is sealed under LocalMachine-scope DPAPI (so no user
+profile is needed, which is the actual failure this issue fixes) and the `.cred`
+file is locked down by the ACL — but no real S4U scheduled task has been observed
+decrypting a credential and connecting to a live node here. That end-to-end check is
+**deferred to the local Torch test-node phase**, where a registered task and a
+reachable compute node exist. Accordingly this PR is "Part of #27", not "Closes
+#27"; the end-to-end acceptance item remains open until it is exercised on that
+harness.

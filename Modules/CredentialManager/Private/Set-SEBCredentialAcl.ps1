@@ -38,9 +38,12 @@ function Set-SEBCredentialAcl {
         itself provides the protection regardless of owner.
 
         Errors are logged via Write-SEBLog and the function returns $false rather
-        than throwing, so a hardening failure degrades gracefully (the credential
-        is still encrypted) instead of breaking Save-SEBCredential. Internal;
-        not exported.
+        than throwing; it does NOT decide the consequence -- the CALLER does. The
+        credential-write path (Write-SEBProtectedCredentialFile) treats a $false here
+        as FATAL: it discards the temp credential file and refuses to publish it,
+        rather than leave ciphertext on disk that non-admin local users could read.
+        (Other callers, e.g. Resolve-CredentialPath hardening the directory, treat it
+        as best-effort.) Internal; not exported.
 
     .PARAMETER Path
         The credential file or Credentials directory to harden.

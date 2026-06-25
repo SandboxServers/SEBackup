@@ -17,8 +17,10 @@ function ConvertFrom-SEBProtectedCredential {
         Forward/back compatibility: Version is honored, not decorative. An envelope
         whose Version this build does not understand is REJECTED with a clear
         warning (returns $null) rather than being fed to the wrong decode path and
-        failing with a generic CryptographicException. Scope is validated to match
-        the backend this build implements. EntropyVersion is passed through to
+        failing with a generic CryptographicException. Scope is mandatory and must
+        equal the backend this build implements ('LocalMachine'): a missing/null or
+        mismatched Scope is rejected so a malformed envelope cannot be decrypted
+        without proving which backend sealed it. EntropyVersion is passed through to
         Unprotect so a blob written under an earlier entropy rotation can still be
         decrypted.
 
@@ -74,13 +76,18 @@ function ConvertFrom-SEBProtectedCredential {
         return $null
     }
 
-    # Scope selects which protection backend wrote the blob. This build implements
-    # only the LocalMachine-DPAPI backend; reject anything else explicitly so a
-    # future scope (e.g. a gMSA/cert backend) cannot be silently mis-decrypted.
-    if ($null -ne $scope -and $scope -ne 'LocalMachine') {
+    # Scope selects which protection backend wrote the blob and is load-bearing, NOT
+    # decorative: a missing/null Scope must be REJECTED rather than accepted, otherwise
+    # a malformed (or hand-crafted) envelope that simply omits the field would be
+    # decrypted without ever proving which backend sealed it. This build implements
+    # only the LocalMachine-DPAPI backend, so the field MUST be present AND equal to
+    # 'LocalMachine'; anything else (absent, null, or a future gMSA/cert scope) is
+    # rejected so a blob cannot be silently mis-decrypted by the wrong backend.
+    $supportedScope = 'LocalMachine'
+    if ($null -eq $scope -or $scope -ne $supportedScope) {
         Write-SEBLog -Level WARN -Context 'CredentialManager' -Message (
-            "Credential envelope declares scope '$scope', but this build only " +
-            "supports the 'LocalMachine' backend. Re-save the credential on this host.")
+            "Credential envelope declares scope '$scope', but this build requires the " +
+            "'$supportedScope' backend (the Scope field is mandatory). Re-save the credential on this host.")
         return $null
     }
 
