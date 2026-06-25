@@ -34,6 +34,7 @@
     FunctionsToExport = @(
         'New-SEBSession'
         'Remove-SEBSession'
+        'Test-SEBSessionExists'
         'Test-SEBConnection'
         'Invoke-SEBRemoteCommand'
         'Get-SEBSharePath'
