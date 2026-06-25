@@ -45,6 +45,8 @@ function Undo-SEBRestore {
     )
 
     $hasLogger = Get-Command -Name 'Write-SEBLog' -ErrorAction SilentlyContinue
+    $lockAcquired = $false
+    $session = $null
 
     $result = [PSCustomObject]@{
         Success         = $false
@@ -54,11 +56,26 @@ function Undo-SEBRestore {
     }
 
     try {
+        # ====================================================================
+        # STEP 0: Acquire the per-instance lock. This is the SAME lock the backup
+        # and restore engines use, so an undo cannot run concurrently with a
+        # scheduled backup (or a restore) of the same instance and corrupt the
+        # world mid-rename. If the lock can't be acquired, fail BEFORE touching
+        # the world.
+        # ====================================================================
+        $lockResult = New-SEBLockFile -InstanceName $InstanceName
+        if (-not $lockResult.Acquired) {
+            throw "Could not acquire lock for undo-restore of '$InstanceName': $($lockResult.Reason)"
+        }
+        $lockAcquired = $true
+
         if ($hasLogger) {
             Write-SEBLog -Message "=== Starting undo-restore for '$InstanceName' on '$NodeName' ===" -Level INFO -Context $InstanceName
         }
 
         # Load configs and create session
+        $globalConfig = Get-SEBGlobalConfig -Force
+
         $nodeConfig = Get-SEBNodeConfig -NodeName $NodeName
         if ($null -eq $nodeConfig) {
             throw "Failed to load node configuration for '$NodeName'."
@@ -201,12 +218,46 @@ function Undo-SEBRestore {
         if ($hasLogger) {
             Write-SEBLog -Message "=== Undo-restore SUCCEEDED for '$InstanceName'. Restored prerestore state. ===" -Level INFO -Context $InstanceName
         }
+
+        # ====================================================================
+        # Send restore notification (best-effort; never blocks the undo).
+        # ====================================================================
+        if ((Get-Command -Name 'Send-SEBRestoreNotification' -ErrorAction SilentlyContinue) -and
+            $globalConfig -and $globalConfig.notifications -and $globalConfig.notifications.enabled) {
+            try {
+                $undoRestorePoint = if ($findResult -and $findResult.Name) { "Undo: $($findResult.Name)" } else { 'Undo' }
+                Send-SEBRestoreNotification `
+                    -InstanceName $InstanceName `
+                    -RestorePoint $undoRestorePoint `
+                    -InitiatedBy  'Undo-SEBRestore' `
+                    -GlobalConfig $globalConfig
+            }
+            catch {
+                Write-Warning "Undo-SEBRestore: failed to send restore notification: $_"
+            }
+        }
     }
     catch {
         $result.ErrorMessage = $_.Exception.Message
 
         if ($hasLogger) {
             Write-SEBLog -Message "=== Undo-restore FAILED for '$InstanceName': $($_.Exception.Message) ===" -Level ERROR -Context $InstanceName
+        }
+    }
+    finally {
+        # Always tear down the session this function created and release the lock,
+        # even if the undo failed partway through.
+        if ($null -ne $session) {
+            try {
+                Remove-SEBSession -NodeName $NodeName
+            }
+            catch {
+                Write-Warning "Undo-SEBRestore: failed to remove session for '$NodeName': $_"
+            }
+        }
+
+        if ($lockAcquired) {
+            Remove-SEBLockFile -InstanceName $InstanceName | Out-Null
         }
     }
 
