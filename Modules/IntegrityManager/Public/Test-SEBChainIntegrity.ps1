@@ -86,10 +86,12 @@ function Test-SEBChainIntegrity {
     $tempDir = $null
 
     try {
-        # InstanceName becomes a directory segment (<BackupRoot>/<InstanceName>); reject any path
-        # traversal so a crafted instance name cannot redirect reads/extraction outside BackupRoot.
-        if ($InstanceName -match '[\\/]' -or $InstanceName.Contains('..') -or [System.IO.Path]::IsPathRooted($InstanceName)) {
-            $result.ErrorMessage = "Invalid InstanceName '$InstanceName': path separators and traversal are not allowed."
+        # InstanceName becomes a directory segment (<BackupRoot>/<InstanceName>); validate it
+        # through the shared traversal/filename guard (Test-SEBSafeName, issue #28) so a crafted
+        # instance name cannot redirect reads/extraction outside BackupRoot. Boolean style so the
+        # function returns its structured result object rather than throwing.
+        if (-not (Test-SEBSafeName -Name $InstanceName)) {
+            $result.ErrorMessage = "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
             return $result
         }
 

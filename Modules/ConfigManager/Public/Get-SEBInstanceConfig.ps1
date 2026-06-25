@@ -52,6 +52,15 @@ function Get-SEBInstanceConfig {
         [string]$InstanceName
     )
 
+    # InstanceName becomes a filename segment in the remote path
+    # ("C:\SEBackup\instances\<InstanceName>.toml"). Validate it through the shared
+    # traversal/filename guard so a crafted or mistyped instance name cannot redirect the remote
+    # read outside the instances directory before it is interpolated into the path below.
+    if (-not (Test-SEBSafeName -Name $InstanceName)) {
+        Write-Error "Invalid InstanceName '$InstanceName': path separators, traversal, rooted paths, wildcards, and invalid filename characters are not allowed."
+        return $null
+    }
+
     $remotePath = "C:\SEBackup\instances\${InstanceName}.toml"
 
     Write-Verbose "Reading instance config from remote node: $($Session.ComputerName):$remotePath"

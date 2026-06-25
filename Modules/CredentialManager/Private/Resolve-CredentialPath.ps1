@@ -44,6 +44,14 @@ function Resolve-CredentialPath {
         # A node name is used as a filename component. Reject anything with a path separator,
         # drive qualifier, or '.'/'..' so a hostile or fat-fingered name cannot write or read
         # a credential file outside the Credentials directory.
+        #
+        # This intentionally keeps its own ALLOWLIST ('^[A-Za-z0-9._-]+$') rather than calling the
+        # shared Test-SEBSafeName denylist (issue #28). Credential files are the most
+        # security-sensitive path in the system, and an allowlist (deny-by-default) is strictly
+        # tighter than the shared denylist -- it additionally rejects spaces and the broader set of
+        # filename-legal Unicode characters that Test-SEBSafeName permits for operator-chosen
+        # instance/node names. Anything this allowlist accepts is also accepted by Test-SEBSafeName,
+        # so the two never disagree on rejecting an unsafe value; this one is just stricter by design.
         if ($NodeName -notmatch '^[A-Za-z0-9._-]+$' -or $NodeName -in @('.', '..')) {
             throw "Invalid node name '$NodeName': only letters, digits, '.', '-', and '_' are allowed (no path separators)."
         }

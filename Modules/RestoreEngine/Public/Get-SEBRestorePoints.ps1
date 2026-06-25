@@ -40,23 +40,13 @@ function Get-SEBRestorePoints {
         [ValidateNotNullOrEmpty()]
         # $InstanceName is concatenated into a filesystem path (Join-Path $BackupRoot $InstanceName).
         # Without this guard, a value like '..\..\x' would escape $BackupRoot and let discovery walk
-        # arbitrary directories. This mirrors New-SEBLockFile's instance-name guard EXACTLY so the
-        # two stay consistent: reject path separators, '..' traversal, rooted paths, wildcard
-        # metacharacters, and any invalid filename characters -- but ALLOW legitimate names that
-        # contain '.', spaces, etc. (which config and New-SEBLockFile accept). An earlier
-        # '^[A-Za-z0-9_-]+$' pattern here was stricter than the rest of the codebase and wrongly
-        # rejected valid instance names like 'PvP.Arena'.
-        # NOTE: issue #28 will consolidate this into a single shared traversal/filename validator;
-        # this inline guard is the immediate fix and is kept in lockstep with New-SEBLockFile.
-        [ValidateScript({
-            if ($_ -match '[\\/]' -or $_.Contains('..') -or
-                [System.IO.Path]::IsPathRooted($_) -or
-                $_ -match '[\*\?\[\]]' -or
-                $_.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
-                throw "Invalid InstanceName '$_': path separators, traversal, wildcards, and invalid filename characters are not allowed."
-            }
-            $true
-        })]
+        # arbitrary directories. Validation is delegated to the shared Test-SEBSafeName (issue #28)
+        # so every name->path boundary stays consistent: it rejects path separators, '..' traversal,
+        # rooted paths, wildcard metacharacters, and any invalid filename characters -- but ALLOWS
+        # legitimate names that contain '.', spaces, etc. The -Throw style makes a rejected value a
+        # terminating parameter-binding error, preserving this call site's original throwing
+        # behaviour.
+        [ValidateScript({ Test-SEBSafeName -Name $_ -Throw })]
         [string]$InstanceName,
 
         [Parameter()]

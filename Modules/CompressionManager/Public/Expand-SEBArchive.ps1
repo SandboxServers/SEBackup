@@ -16,6 +16,13 @@ function Expand-SEBArchive {
         Creates the destination directory if it does not exist. Uses the -y flag with
         7-Zip to automatically overwrite existing files during extraction.
 
+        Zip-slip containment: before any file is written, every archive entry is resolved against
+        the destination root and rejected if it would land outside that root (a '..' traversal or
+        a rooted/absolute entry). The extraction aborts -- and removes a freshly created
+        destination directory -- rather than writing a single escaping entry. This guards the
+        production node against arbitrary-write via a crafted or manifest-supplied archive. The
+        check runs in the same (local or remote) runspace as the extraction itself.
+
     .PARAMETER ArchivePath
         The full path to the archive file to extract. Must exist on the target system
         (local or remote depending on Session parameter).
@@ -82,8 +89,12 @@ function Expand-SEBArchive {
                 [string]$Destination
             )
 
+            # Track whether WE created the destination, so a zip-slip abort can clean up a directory
+            # that did not exist before this call (avoid leaving an empty dir behind on rejection).
+            $destPreexisted = Test-Path -Path $Destination -PathType Container
+
             # Create destination if needed
-            if (-not (Test-Path -Path $Destination -PathType Container)) {
+            if (-not $destPreexisted) {
                 New-Item -Path $Destination -ItemType Directory -Force -ErrorAction Stop | Out-Null
             }
 
@@ -105,6 +116,53 @@ function Expand-SEBArchive {
             }
             if (-not $sevenZip) {
                 throw '7z.exe not found on the node.'
+            }
+
+            # --- Zip-slip containment (pre-extraction) ---
+            # 7-Zip's 'x' restores full stored paths, so an entry named '..\evil' or a rooted path
+            # would be written OUTSIDE $Destination. List the entries first ('l -slt', the same
+            # machine-parseable listing Get-SEBArchiveContents uses) and resolve each against the
+            # destination root; if ANY entry escapes, abort BEFORE writing anything.
+            $destRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            $listOutput = & $sevenZip l -slt $Archive 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
+                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                throw "7-Zip listing failed (exit code $LASTEXITCODE); cannot verify archive entries before extraction."
+            }
+
+            # In '-slt' output the archive's OWN header block (which carries a 'Path = <full archive
+            # path>' line) comes BEFORE the '----------' separator; the per-file entry blocks come
+            # after it. Only evaluate 'Path =' lines that appear after the separator so the archive's
+            # own absolute path is never mistaken for an escaping entry.
+            $inEntries = $false
+            $offending = $null
+            foreach ($line in $listOutput) {
+                $lineStr = $line.ToString()
+                if (-not $inEntries) {
+                    if ($lineStr -match '^-{5,}\s*$') { $inEntries = $true }
+                    continue
+                }
+                if ($lineStr -match '^Path = (.+)$') {
+                    $entryPath = $Matches[1].Trim()
+                    # Path.Combine resolves a rooted entry by DISCARDING $Destination, so a rooted
+                    # entry lands outside $destRoot and is correctly rejected. '..' segments are
+                    # collapsed by GetFullPath, catching traversal. Folder entries are checked too:
+                    # a '..' directory entry is just as unsafe to recreate as a file.
+                    $resolved = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Destination, $entryPath))
+                    if (-not $resolved.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $offending = $entryPath
+                        break
+                    }
+                }
+            }
+
+            if ($null -ne $offending) {
+                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
+                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                throw "Refusing to extract '$Archive': entry '$offending' would escape the destination '$Destination' (zip-slip/path traversal)."
             }
 
             $args7z = @('x', $Archive, "-o$Destination", '-y')
@@ -138,9 +196,45 @@ function Expand-SEBArchive {
                 [string]$Destination
             )
 
+            # Track whether WE created the destination so a zip-slip abort can clean up a directory
+            # that did not exist before this call.
+            $destPreexisted = Test-Path -Path $Destination -PathType Container
+
             # Create destination if needed
-            if (-not (Test-Path -Path $Destination -PathType Container)) {
+            if (-not $destPreexisted) {
                 New-Item -Path $Destination -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            }
+
+            # --- Zip-slip containment (pre-extraction) ---
+            # Expand-Archive will happily honour a '..' or rooted entry path and write outside
+            # $Destination. Enumerate the entries via System.IO.Compression first, resolve each
+            # against the destination root, and abort BEFORE writing anything if one escapes.
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            $destRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            $offending = $null
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Archive)
+            try {
+                foreach ($entry in $zip.Entries) {
+                    # A pure directory entry has an empty Name (FullName ends with '/'); it writes no
+                    # file by itself, but a '..' directory entry is still suspect, so resolve every
+                    # entry uniformly. Path.Combine discards $Destination for a rooted entry (so it
+                    # falls outside $destRoot), and GetFullPath collapses '..' traversal.
+                    $resolved = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($Destination, $entry.FullName))
+                    if (-not $resolved.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $offending = $entry.FullName
+                        break
+                    }
+                }
+            }
+            finally {
+                $zip.Dispose()
+            }
+
+            if ($null -ne $offending) {
+                if (-not $destPreexisted -and (Test-Path -Path $Destination)) {
+                    Remove-Item -Path $Destination -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                throw "Refusing to extract '$Archive': entry '$offending' would escape the destination '$Destination' (zip-slip/path traversal)."
             }
 
             Expand-Archive -Path $Archive -DestinationPath $Destination -Force -ErrorAction Stop
