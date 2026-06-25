@@ -151,6 +151,59 @@ BeforeAll {
             FinalWorld      = $finalWorld
         }
     }
+
+    # Build an instance whose ONLY backup is a full (no incrementals) -- the brand-new-instance
+    # case. Exercises the single-member chain path: Get-SEBManifestChain returns one element, which
+    # must stay array-shaped so L3 can reconstruct and verify it.
+    function New-FullOnlyChainOnDisk {
+        $backupRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sebchain_" + [guid]::NewGuid().ToString('n'))
+        $instance = 'Survival01'
+        $instanceDir = Join-Path $backupRoot $instance
+        $fullDir = Join-Path $instanceDir 'full'
+        $manifestDir = Join-Path $instanceDir 'manifests'
+        foreach ($d in @($fullDir, $manifestDir)) {
+            New-Item -Path $d -ItemType Directory -Force | Out-Null
+        }
+
+        $fullStage = Join-Path ([System.IO.Path]::GetTempPath()) ("sebstage_" + [guid]::NewGuid().ToString('n'))
+        New-Item -Path $fullStage -ItemType Directory -Force | Out-Null
+        $fullWorld = @{
+            'Sandbox.sbc'            = 'first-full'
+            'sub/SANDBOX_0_0_0_.sbs' = 'sector-only'
+        }
+        Set-WorldFiles -Root $fullStage -Files $fullWorld
+
+        $fullArchiveName = 'Survival01_FULL_20260301_020000.zip'
+        $fullArchivePath = Join-Path $fullDir $fullArchiveName
+        Compress-Archive -Path (Join-Path $fullStage '*') -DestinationPath $fullArchivePath -Force
+
+        $fullFiles = @{}
+        foreach ($rel in $fullWorld.Keys) {
+            $fullFiles[$rel] = New-FileEntry -FullPath (Join-Path $fullStage ($rel -replace '/', [System.IO.Path]::DirectorySeparatorChar))
+        }
+
+        $fullManifest = @{
+            version            = 2
+            type               = 'full'
+            chain_id           = [guid]::NewGuid().ToString()
+            chain_sequence     = 0
+            parent_manifest    = $null
+            timestamp          = '2026-03-01T02:00:00.0000000Z'
+            archive_path       = $fullArchiveName
+            archive_sha256     = (Get-FileHash -LiteralPath $fullArchivePath -Algorithm SHA256).Hash.ToLower()
+            archive_size_bytes = (Get-Item -LiteralPath $fullArchivePath).Length
+            files              = $fullFiles
+            deleted_files      = @()
+        }
+        $fullManifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $manifestDir 'Survival01_FULL_20260301_020000.json') -Encoding UTF8
+
+        Remove-Item -LiteralPath $fullStage -Recurse -Force -ErrorAction SilentlyContinue
+
+        return [PSCustomObject]@{
+            BackupRoot   = $backupRoot
+            InstanceName = $instance
+        }
+    }
 }
 
 Describe 'Test-SEBChainIntegrity end-to-end (issue #6)' {
@@ -208,6 +261,20 @@ Describe 'Test-SEBChainIntegrity end-to-end (issue #6)' {
             $r = Test-SEBChainIntegrity -InstanceName $c.InstanceName -BackupRoot $c.BackupRoot
             $r.Passed | Should -BeFalse -Because "the incremental archive bytes no longer match its manifest/CRC"
             $r.ErrorMessage | Should -Not -BeNullOrEmpty
+        }
+        finally { Remove-Item -LiteralPath $c.BackupRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'passes a full-only chain (brand-new instance, single member)' {
+        # Get-SEBManifestChain returns a one-element chain here; it must stay array-shaped so
+        # $chain.Count is 1 (not the hashtable key count) and $chain[0] is the full manifest.
+        $c = New-FullOnlyChainOnDisk
+        try {
+            $r = Test-SEBChainIntegrity -InstanceName $c.InstanceName -BackupRoot $c.BackupRoot
+            $r.ErrorMessage | Should -BeNullOrEmpty -Because "a lone valid full backup is a complete, verifiable chain"
+            $r.Passed | Should -BeTrue -Because "a brand-new instance with only a full backup must pass L3"
+            $r.ChainLength | Should -Be 1
+            $r.ReconstructionValid | Should -BeTrue
         }
         finally { Remove-Item -LiteralPath $c.BackupRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }

@@ -152,7 +152,11 @@ function Test-SEBChainIntegrity {
             return $result
         }
 
-        $chain = Get-SEBManifestChain -InstanceName $InstanceName -TargetManifest $targetManifest -BackupRoot $BackupRoot
+        # Wrap in @() so a single-member (full-only) chain stays an array. Get-SEBManifestChain
+        # returns $list.ToArray(); for one element PowerShell would otherwise unwrap that to a
+        # bare hashtable, making $chain.Count the key count and $chain[0] $null. A brand-new
+        # instance whose only backup is a full must still pass L3, so keep it array-shaped.
+        $chain = @(Get-SEBManifestChain -InstanceName $InstanceName -TargetManifest $targetManifest -BackupRoot $BackupRoot)
 
         if ($null -eq $chain -or $chain.Count -eq 0) {
             $result.ErrorMessage = "No manifest chain found for instance '$InstanceName'" +
