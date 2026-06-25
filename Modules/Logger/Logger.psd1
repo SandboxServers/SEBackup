@@ -8,7 +8,7 @@
     ModuleVersion     = '1.0.0'
 
     # ID used to uniquely identify this module
-    GUID              = 'a3f7e8b2-6c41-4d9a-b5e3-1f2a8c9d0e7b'
+    GUID              = 'd9a5ac07-7e8a-4d8d-9334-08c7fce68c98'
 
     # Author of this module
     Author            = 'SEBackup Project'
