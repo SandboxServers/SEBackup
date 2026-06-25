@@ -25,17 +25,27 @@
 .PARAMETER ExcludeTag
     Pester tags to exclude (default: E2E, Integration -- the infra-dependent suites).
 
+.PARAMETER Coverage
+    Measure JaCoCo code coverage over Modules/ during the (same) Pester run and enforce the
+    ratchet gate against coverage-baseline.json: the build FAILS if overall coverage drops more
+    than a small tolerance below the committed baseline, so coverage can only hold or climb. CI
+    passes this; local quick runs can omit it (coverage instrumentation adds wall-clock, and the
+    gate only applies when coverage was actually measured). Writes coverage.xml (gitignored).
+
 .EXAMPLE
-    ./build.ps1 -InstallDeps      # what CI runs
+    ./build.ps1 -InstallDeps -Coverage   # what CI runs
 .EXAMPLE
-    ./build.ps1                   # local, deps already present
+    ./build.ps1                          # local quick run (deps present, no coverage gate)
+.EXAMPLE
+    ./build.ps1 -Coverage                # local run WITH the coverage ratchet gate
 .OUTPUTS
-    Exit code 0 on success, 1 on any analyzer-error/test failure.
+    Exit code 0 on success, 1 on any analyzer-error/test/coverage-gate failure.
 #>
 [CmdletBinding()]
 param(
     [switch]$InstallDeps,
-    [string[]]$ExcludeTag = @('E2E', 'Integration')
+    [string[]]$ExcludeTag = @('E2E', 'Integration'),
+    [switch]$Coverage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -134,6 +144,19 @@ $conf.TestResult.Enabled = $true
 $conf.TestResult.OutputFormat = 'NUnitXml'
 $conf.TestResult.OutputPath = Join-Path $RepoRoot 'testResults.xml'
 
+# Coverage is folded into THIS Pester run (one suite execution, not two) so CI time stays
+# reasonable. It is opt-in via -Coverage because breakpoint instrumentation adds measurable
+# wall-clock; the ratchet gate below only runs when coverage was actually measured.
+$coverageXml = Join-Path $RepoRoot 'coverage.xml'
+if ($Coverage) {
+    $conf.CodeCoverage.Enabled = $true
+    $conf.CodeCoverage.Path = Join-Path $RepoRoot 'Modules'  # production code only, not Tests/
+    $conf.CodeCoverage.OutputFormat = 'JaCoCo'               # build-server-friendly report
+    $conf.CodeCoverage.OutputPath = $coverageXml             # gitignored; uploaded as a CI artifact
+    # RecursePaths/SingleHitBreakpoints/ExcludeTests all default true (verified on Pester 5.7.1):
+    # recurse the module tree, drop each breakpoint once hit (faster), and don't count test files.
+}
+
 $result = Invoke-Pester -Configuration $conf
 $ran = $result.PassedCount + $result.FailedCount
 if ($result.Result -ne 'Passed') {
@@ -153,6 +176,98 @@ elseif ($ran -lt 1) {
 }
 else {
     Write-Host "Pester OK: $($result.PassedCount) passed, $($result.SkippedCount) skipped."
+}
+
+# ── Gate 3: Coverage ratchet ──────────────────────────────────────────────────
+# Only runs when coverage was measured (-Coverage). Compares the run's overall % against the
+# committed baseline in coverage-baseline.json and FAILS the build if it dropped more than a
+# tolerance below baseline. The tolerance absorbs measurement jitter: a few lines hit by timing-
+# or environment-dependent paths flip between runs, nudging the % by fractions of a point. The
+# baseline only moves UP, and only by a deliberate human commit (see the "ratchet" hint below).
+if ($Coverage) {
+    Write-Host ''
+    Write-Host '== Coverage ratchet =='
+
+    # Tolerance (percentage points) below baseline that is still accepted. Small enough that a
+    # real regression (a whole function left untested) trips it, large enough to ride out jitter.
+    $coverageTolerance = 0.75
+
+    # How far above baseline before we suggest raising it. Avoids nagging on every fractional gain.
+    $ratchetHintMargin = 1.0
+
+    $cc = $result.CodeCoverage
+    if (-not $cc) {
+        # CodeCoverage was requested but the run produced no coverage object -- treat as a hard
+        # failure rather than a silent pass (a green build that measured nothing is the trap).
+        Write-Host 'FAIL: -Coverage was set but no coverage data was produced.'
+        $failed = $true
+    }
+    else {
+        $currentOverall = [math]::Round($cc.CoveragePercent, 2)
+
+        # Per-module % from command-level hit/miss data, grouped by the module folder name (the
+        # path segment right after Modules/). Lets us NAME which modules regressed on a drop.
+        $cmds = @(
+            @($cc.CommandsExecuted | ForEach-Object { [pscustomobject]@{ File = $_.File; Hit = $true } }) +
+            @($cc.CommandsMissed   | ForEach-Object { [pscustomobject]@{ File = $_.File; Hit = $false } })
+        )
+        $currentPerModule = [ordered]@{}
+        $cmds | Group-Object {
+            if ($_.File -match '[\\/]Modules[\\/]([^\\/]+)[\\/]') { $Matches[1] } else { 'OTHER' }
+        } | Sort-Object Name | ForEach-Object {
+            $total = $_.Count
+            $hit = @($_.Group | Where-Object Hit).Count
+            $currentPerModule[$_.Name] = if ($total) { [math]::Round(100.0 * $hit / $total, 2) } else { 0.0 }
+        }
+
+        # Load the committed ratchet baseline.
+        $baselinePath = Join-Path $RepoRoot 'coverage-baseline.json'
+        if (-not (Test-Path -LiteralPath $baselinePath)) {
+            Write-Host "FAIL: coverage baseline not found at $baselinePath (run with -Coverage and commit the file)."
+            $failed = $true
+        }
+        else {
+            $baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
+            $baseOverall = [double]$baseline.overall
+            $floor = [math]::Round($baseOverall - $coverageTolerance, 2)
+
+            Write-Host ("Coverage: {0}% overall (baseline {1}%, floor {2}% with {3}pt tolerance)." -f `
+                    $currentOverall, $baseOverall, $floor, $coverageTolerance)
+
+            if ($currentOverall -lt $floor) {
+                # DROP below the allowed floor -> fail and name the modules that regressed so the
+                # author knows where to add tests (or which module's deletion shifted the ratio).
+                Write-Host ("FAIL: coverage {0}% is below baseline {1}% (floor {2}%)." -f `
+                        $currentOverall, $baseOverall, $floor)
+                $regressed = @()
+                if ($baseline.perModule) {
+                    foreach ($name in $currentPerModule.Keys) {
+                        $bm = $baseline.perModule.$name
+                        if ($null -ne $bm -and $currentPerModule[$name] -lt ([double]$bm - $coverageTolerance)) {
+                            $regressed += '{0} {1}% -> {2}%' -f $name, ([double]$bm), $currentPerModule[$name]
+                        }
+                    }
+                }
+                if ($regressed.Count) {
+                    Write-Host '  regressed modules:'
+                    $regressed | ForEach-Object { Write-Host "    $_" }
+                }
+                else {
+                    Write-Host '  (no single module crossed the per-module tolerance; the overall ratio shifted -- e.g. new uncovered code or a covered module removed).'
+                }
+                $failed = $true
+            }
+            else {
+                Write-Host 'Coverage OK vs baseline.'
+                if ($currentOverall -ge ($baseOverall + $ratchetHintMargin)) {
+                    # INCREASE beyond the margin: nudge -- but do NOT auto-raise. Raising the
+                    # baseline is a deliberate commit so the new floor is reviewed and intentional.
+                    Write-Host ("  ratchet: baseline can be raised to {0}% (currently {1}%). Update coverage-baseline.json in a commit to lock it in." -f `
+                            $currentOverall, $baseOverall)
+                }
+            }
+        }
+    }
 }
 
 # ── Result ───────────────────────────────────────────────────────────────────

@@ -158,9 +158,37 @@ Invoke-Pester -Path ./Tests/ConfigManager.Tests.ps1 -Output Detailed
 `windows-latest`); run it locally to reproduce CI exactly:
 
 ```powershell
-./build.ps1              # PSScriptAnalyzer (Error+ParseError, baselined) + Pester (excludes E2E/Integration)
-./build.ps1 -InstallDeps # also installs the pinned PSToml / Pester / PSScriptAnalyzer versions
+./build.ps1                       # analyzer (Error+ParseError, baselined) + Pester (excludes E2E/Integration)
+./build.ps1 -InstallDeps          # also installs the pinned PSToml / Pester / PSScriptAnalyzer versions
+./build.ps1 -Coverage             # also measures coverage and enforces the ratchet gate (below)
+./build.ps1 -InstallDeps -Coverage # exactly what CI runs
 ```
+
+### Code coverage gate and ratchet
+
+CI runs `build.ps1 -Coverage`, which folds JaCoCo code coverage over `Modules/` into the **same**
+Pester run (no second pass) and writes `coverage.xml` (gitignored; uploaded as the `coverage-report`
+CI artifact next to `pester-results`/`testResults.xml`). Coverage is **opt-in** via `-Coverage`
+because the breakpoint instrumentation adds roughly 30% wall-clock to the suite; a plain
+`./build.ps1` quick run skips it, and the gate only applies when coverage was actually measured.
+
+The gate is a **ratchet**: coverage can hold or climb, never silently fall.
+
+- The committed baseline lives in **`coverage-baseline.json`** (`{ "overall": <pct>, "perModule": { ... } }`).
+- The build **FAILS** if the measured overall coverage drops more than the tolerance (0.75 pts, to
+  absorb run-to-run jitter from timing-dependent line hits) below `overall`. On a drop it prints
+  `coverage X% is below baseline Y%` and names the modules that regressed.
+- When coverage rises more than ~1 pt above the baseline, the build prints a
+  `ratchet: baseline can be raised to X%` hint. It does **not** auto-raise — see below.
+
+**Raising the baseline (do this when you add tests that lift coverage):**
+
+1. Run `./build.ps1 -Coverage` and note the printed overall % (and the ratchet hint).
+2. Edit `coverage-baseline.json`: set `overall` to the new number, and update the relevant
+   `perModule` entries (the per-module values are the module command hit-ratios the gate prints).
+3. Commit it in the same PR. Raising the floor is deliberate so the new minimum is reviewed.
+
+Never *lower* the baseline to make a red build pass — fix the missing tests instead.
 
 ### Test Guidelines
 

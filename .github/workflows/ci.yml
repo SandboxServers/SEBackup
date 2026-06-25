@@ -26,9 +26,9 @@ jobs:
         shell: pwsh
         run: $PSVersionTable | Format-List
 
-      - name: Run CI build (analyzer + tests)
+      - name: Run CI build (analyzer + tests + coverage gate)
         shell: pwsh
-        run: ./build.ps1 -InstallDeps
+        run: ./build.ps1 -InstallDeps -Coverage
 
       - name: Upload Pester results
         if: always()
@@ -36,4 +36,12 @@ jobs:
         with:
           name: pester-results
           path: testResults.xml
+          if-no-files-found: warn
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: coverage-report
+          path: coverage.xml
           if-no-files-found: warn
