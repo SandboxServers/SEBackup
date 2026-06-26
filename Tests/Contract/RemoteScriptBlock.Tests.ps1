@@ -13,6 +13,10 @@ BeforeDiscovery {
         ForEach-Object { @{ Path = $_.FullName; Name = $_.FullName.Replace($repoRoot, '').TrimStart('\', '/') } }
 }
 
+BeforeAll {
+    . "$PSScriptRoot/_ContractAst.ps1"   # memoized Get-ContractAst (shared parse cache)
+}
+
 Describe 'Remote-executed script blocks stay node-local' {
     It 'remote blocks in <Name> call no SEB functions and reference no C&C vars' -ForEach $script:callerFiles {
         # C&C-local variables that must never be referenced directly inside a remote block.
@@ -23,8 +27,7 @@ Describe 'Remote-executed script blocks stay node-local' {
         )
         $remoteWrappers = @('Invoke-SEBWithShadowCopy', 'Invoke-SEBRemoteCommand')
 
-        $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+        $ast = (Get-ContractAst -Path $Path).Ast
 
         $violations = [System.Collections.Generic.List[string]]::new()
 

@@ -19,6 +19,7 @@ BeforeDiscovery {
 }
 
 BeforeAll {
+    . "$PSScriptRoot/_ContractAst.ps1"   # memoized Get-ContractAst (shared parse cache)
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
     Import-Module "$repoRoot/SEBackup.psd1" -Force -DisableNameChecking 3>$null
 
@@ -53,8 +54,7 @@ BeforeAll {
 
 Describe 'Exported SEBackup functions are called with valid parameters' {
     It 'all SEB-function calls in <Name> use declared parameters' -ForEach $script:callerFiles {
-        $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+        $ast = (Get-ContractAst -Path $Path).Ast
 
         $calls = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)
 
