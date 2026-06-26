@@ -41,8 +41,10 @@ function Copy-SEBThrottled {
         is not available.
 
     .PARAMETER Credential
-        An optional PSCredential object for authenticating to UNC paths. Passed through
-        to the underlying transfer mechanism when needed.
+        An optional PSCredential object for authenticating to UNC paths. Honored by the BITS
+        (Strategy 1) and Copy-Item (Strategy 3) paths. The robocopy path (Strategy 2) CANNOT use
+        it -- robocopy runs as the calling identity and has no credential parameter -- so a
+        -Credential supplied on a robocopy transfer is ignored with a warning (see issue #61).
 
     .EXAMPLE
         Copy-SEBThrottled -Source "C:\Backup\archive.7z" -Destination "\\NAS\Backups\" -UseBITS
@@ -124,6 +126,17 @@ function Copy-SEBThrottled {
         }
         # Strategy 2: Robocopy with /IPG
         elseif ((Get-Command -Name 'robocopy' -ErrorAction SilentlyContinue)) {
+            # robocopy is a native exe with no credential parameter (it runs as the calling
+            # identity), so a supplied -Credential cannot be honored on this path -- BITS and
+            # Copy-Item do honor it. Warn rather than silently transferring as the wrong identity
+            # (issue #61).
+            if ($Credential) {
+                Write-Warning ("Copy-SEBThrottled: -Credential is ignored by the robocopy transfer strategy " +
+                    "(robocopy runs as the calling identity and has no credential parameter). For a credentialed " +
+                    "transfer use -UseBITS, or pre-authenticate the destination (e.g. a mapped/`New-PSDrive` share) " +
+                    "so the current identity can reach it.")
+            }
+
             # Determine effective IPG value
             $effectiveIpg = $RobocopyIpgMs
             if ($effectiveIpg -le 0 -and $MaxBandwidthMbps -gt 0) {
