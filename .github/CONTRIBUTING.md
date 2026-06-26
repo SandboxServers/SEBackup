@@ -158,9 +158,60 @@ Invoke-Pester -Path ./Tests/ConfigManager.Tests.ps1 -Output Detailed
 `windows-latest`); run it locally to reproduce CI exactly:
 
 ```powershell
-./build.ps1              # PSScriptAnalyzer (Error+ParseError, baselined) + Pester (excludes E2E/Integration)
-./build.ps1 -InstallDeps # also installs the pinned PSToml / Pester / PSScriptAnalyzer versions
+./build.ps1                       # analyzer (Error+ParseError, baselined) + Pester (excludes E2E/Integration)
+./build.ps1 -InstallDeps          # also installs the pinned PSToml / Pester / PSScriptAnalyzer versions
+./build.ps1 -Coverage             # also measures coverage and enforces the ratchet gate (below)
+./build.ps1 -InstallDeps -Coverage # exactly what CI runs
 ```
+
+### Code coverage gate and ratchet
+
+CI runs `build.ps1 -Coverage` (alias `-CodeCoverage`), which folds JaCoCo code coverage over
+`Modules/` into the **same** Pester run (no second pass) and writes `coverage.xml` (gitignored;
+uploaded as the `coverage-report` CI artifact next to `pester-results`/`testResults.xml`). Coverage
+is **opt-in** because the breakpoint instrumentation adds measurable wall-clock — about **+14s**
+on the current suite (~44s → ~58s, roughly a 30% increase) — so a plain `./build.ps1` quick run
+skips it, and the gate only applies when coverage was actually measured.
+
+The gate is a **ratchet**: coverage can hold or climb, never silently fall. It enforces **three**
+independent checks so no single module can quietly shed its tests behind another module's gains,
+and so the baseline itself can't be edited down to disarm the gate:
+
+- The committed baseline lives in **`coverage-baseline.json`** (`{ "overall": <pct>, "perModule": { ... } }`).
+  `overall` is Pester's JaCoCo overall %; each `perModule` value is that module's command hit-ratio
+  (the same number the gate computes at runtime).
+- **Overall ratchet** — the build **FAILS** if measured overall drops more than the tolerance
+  (**0.30 pts** — ~15× the ~0.02pt run-to-run jitter) below `overall`.
+- **Per-module ratchet** — the build also **FAILS** if **any** module's hit-ratio drops more than
+  the same 0.30 pt tolerance below its **own** `perModule` baseline. This runs **every** build (not
+  only when overall falls), so a module losing its tests trips the gate even if overall stays flat.
+  A baseline module that produces **no** coverage (deleted, or its tests stopped running) also fails;
+  a **new** module not yet in the map prints a `WARN` telling you to add its entry.
+- **Absolute hard floor** — independent of the baseline, the build **FAILS** if the measured overall
+  (or the committed `overall` itself) is below **50%** (a documented constant well under the real
+  ~57.31%). This catches a gutted suite *and* a baseline tampered down to a tiny number.
+- When coverage rises more than ~1 pt above the baseline, the build prints a
+  `ratchet: baseline can be raised to X%` hint. It does **not** auto-raise — see below.
+
+**Raising the baseline (do this when you add tests that lift coverage):**
+
+1. Run `./build.ps1 -Coverage`. Note the printed overall % (and the ratchet hint). The build also
+   prints each baseline module's current hit-ratio in the `== Coverage ratchet ==` block, plus a
+   `WARN` line listing any **new** module not yet in the map.
+2. Edit `coverage-baseline.json`:
+   - Set `overall` to the new printed overall %.
+   - **Update the `perModule` entries too** — the ratchet hint only mentions the overall, but the
+     per-module floors are enforced independently, so raise each module you improved to its new
+     current value, and **add an entry for any module the build WARNed was missing** (use the value
+     it printed). Leaving a `perModule` value stale just keeps an old (lower) floor for that module;
+     omitting a new module entirely means it stays ungated at the per-module level until you add it.
+   - If a module was intentionally **removed** from `Modules/`, delete its `perModule` entry (the
+     build FAILs on a baseline module that produced no coverage).
+3. Commit it in the same PR. Raising the floor — overall *and* per-module — is deliberate so the new
+   minimum is reviewed.
+
+Never *lower* the `overall` or a `perModule` value to make a red build pass — fix the missing tests
+instead. (A baseline `overall` below the 50% absolute floor is rejected outright as tampered.)
 
 ### Test Guidelines
 

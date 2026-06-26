@@ -161,6 +161,8 @@ _TeamCity*
 coverage*.json
 coverage*.xml
 coverage*.info
+# ...but the committed ratchet baseline IS tracked (see build.ps1 Gate 3 / .github/CONTRIBUTING.md).
+!coverage-baseline.json
 
 # Visual Studio code coverage results
 *.coverage

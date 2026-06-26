@@ -1,0 +1,22 @@
+{
+  "_comment": "Code-coverage ratchet baseline for build.ps1 Gate 3. 'overall' is Pester's JaCoCo CoveragePercent over Modules/; 'perModule' is per-module command hit-ratio (same computation the gate uses at runtime, used only to name regressed modules). Raise these numbers in a deliberate commit when build.ps1 prints the 'ratchet: baseline can be raised' hint. See .github/CONTRIBUTING.md. Measured on 1199 passing tests.",
+  "overall": 57.31,
+  "perModule": {
+    "BackupEngine": 49.5,
+    "CompressionManager": 39.54,
+    "ConfigManager": 66.37,
+    "CredentialManager": 72.0,
+    "IntegrityManager": 79.44,
+    "LoadMonitor": 57.52,
+    "Logger": 59.6,
+    "ManifestManager": 80.28,
+    "MetricsCollector": 73.03,
+    "NetworkThrottle": 77.25,
+    "NotificationManager": 89.39,
+    "RemoteManager": 45.65,
+    "RestoreEngine": 39.76,
+    "SchedulerManager": 87.5,
+    "VRageAPI": 46.4,
+    "VSSManager": 13.73
+  }
+}
