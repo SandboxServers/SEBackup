@@ -27,10 +27,17 @@
 
 .PARAMETER Coverage
     Measure JaCoCo code coverage over Modules/ during the (same) Pester run and enforce the
-    ratchet gate against coverage-baseline.json: the build FAILS if overall coverage drops more
-    than a small tolerance below the committed baseline, so coverage can only hold or climb. CI
-    passes this; local quick runs can omit it (coverage instrumentation adds wall-clock, and the
-    gate only applies when coverage was actually measured). Writes coverage.xml (gitignored).
+    ratchet gate against coverage-baseline.json. The gate FAILS the build if ANY of these trip,
+    so coverage can only hold or climb and no single module can quietly lose its tests:
+      * OVERALL drops more than the tolerance below the committed baseline overall;
+      * ANY PER-MODULE hit-ratio drops more than the tolerance below its own committed baseline
+        (a module losing its tests fails even if the overall ratio stays within tolerance);
+      * the measured overall (or the committed baseline overall) falls below an ABSOLUTE hard
+        floor that does not depend on the baseline -- so editing the baseline down to a tiny
+        number can't silently disarm the gate.
+    Alias: -CodeCoverage. CI passes this; local quick runs can omit it (coverage instrumentation
+    adds wall-clock, and the gate only applies when coverage was actually measured). Writes
+    coverage.xml (gitignored).
 
 .EXAMPLE
     ./build.ps1 -InstallDeps -Coverage   # what CI runs
@@ -45,6 +52,8 @@
 param(
     [switch]$InstallDeps,
     [string[]]$ExcludeTag = @('E2E', 'Integration'),
+    # Alias 'CodeCoverage' so the issue-#17 wording (-CodeCoverage) works too. Same switch.
+    [Alias('CodeCoverage')]
     [switch]$Coverage
 )
 
@@ -179,18 +188,37 @@ else {
 }
 
 # ── Gate 3: Coverage ratchet ──────────────────────────────────────────────────
-# Only runs when coverage was measured (-Coverage). Compares the run's overall % against the
-# committed baseline in coverage-baseline.json and FAILS the build if it dropped more than a
-# tolerance below baseline. The tolerance absorbs measurement jitter: a few lines hit by timing-
-# or environment-dependent paths flip between runs, nudging the % by fractions of a point. The
-# baseline only moves UP, and only by a deliberate human commit (see the "ratchet" hint below).
+# Only runs when coverage was measured (-Coverage). The gate is deliberately un-gameable: it
+# enforces THREE independent things against coverage-baseline.json so coverage can only hold or
+# climb and no single module can quietly shed its tests behind another's gains:
+#   1. OVERALL ratchet: measured overall must stay within $coverageTolerance of baseline.overall.
+#   2. PER-MODULE ratchet: EVERY module in baseline.perModule must stay within $coverageTolerance
+#      of its OWN baseline -- enforced every run, not merely reported on an overall failure. A
+#      module losing its tests fails the build even when the overall ratio rides within tolerance
+#      (one module's gain can no longer mask another's collapse).
+#   3. ABSOLUTE hard floor ($coverageAbsoluteFloor): a baseline-independent minimum applied to BOTH
+#      the measured overall AND the committed baseline.overall. This catches a gutted suite and a
+#      tampered baseline (e.g. someone editing overall down to a tiny number to disarm the gate) --
+#      the floor is well below the real ~57% so it never false-trips, but a baseline below it is
+#      rejected as implausible rather than trusted.
+# The tolerance absorbs measurement jitter: a few lines hit by timing-/environment-dependent paths
+# flip between runs, nudging the % by fractions of a point. The baseline only moves UP, and only by
+# a deliberate human commit (see the "ratchet" hint below and .github/CONTRIBUTING.md).
 if ($Coverage) {
     Write-Host ''
     Write-Host '== Coverage ratchet =='
 
-    # Tolerance (percentage points) below baseline that is still accepted. Small enough that a
-    # real regression (a whole function left untested) trips it, large enough to ride out jitter.
-    $coverageTolerance = 0.75
+    # Tolerance (percentage points) below baseline still accepted, for BOTH the overall and each
+    # per-module floor. Measured run-to-run jitter is ~0.02pt, so 0.3pt is ~15x the noise -- wide
+    # enough to ride out that jitter, tight enough that real erosion (a function/test removed) trips
+    # it promptly. Named constant: change it here, in one place, for both gates.
+    $coverageTolerance = 0.30
+
+    # Absolute, BASELINE-INDEPENDENT hard floor (percentage points). Documented constant set well
+    # below the real measured overall (~57.31%) so it never false-trips, yet high enough to catch a
+    # gutted suite or a baseline that was edited down to defeat the ratchet. Applied to the measured
+    # overall AND to baseline.overall (an implausibly low baseline is rejected, not trusted).
+    $coverageAbsoluteFloor = 50.0
 
     # How far above baseline before we suggest raising it. Avoids nagging on every fractional gain.
     $ratchetHintMargin = 1.0
@@ -206,7 +234,8 @@ if ($Coverage) {
         $currentOverall = [math]::Round($cc.CoveragePercent, 2)
 
         # Per-module % from command-level hit/miss data, grouped by the module folder name (the
-        # path segment right after Modules/). Lets us NAME which modules regressed on a drop.
+        # path segment right after Modules/). This is BOTH the per-module gate input and how we
+        # name regressors. Stored as a hashtable for O(1) presence checks against the baseline.
         $cmds = @(
             @($cc.CommandsExecuted | ForEach-Object { [pscustomobject]@{ File = $_.File; Hit = $true } }) +
             @($cc.CommandsMissed   | ForEach-Object { [pscustomobject]@{ File = $_.File; Hit = $false } })
@@ -231,38 +260,112 @@ if ($Coverage) {
             $baseOverall = [double]$baseline.overall
             $floor = [math]::Round($baseOverall - $coverageTolerance, 2)
 
-            Write-Host ("Coverage: {0}% overall (baseline {1}%, floor {2}% with {3}pt tolerance)." -f `
-                    $currentOverall, $baseOverall, $floor, $coverageTolerance)
+            Write-Host ("Coverage: {0}% overall (baseline {1}%, floor {2}% with {3}pt tolerance; absolute floor {4}%)." -f `
+                    $currentOverall, $baseOverall, $floor, $coverageTolerance, $coverageAbsoluteFloor)
 
-            if ($currentOverall -lt $floor) {
-                # DROP below the allowed floor -> fail and name the modules that regressed so the
-                # author knows where to add tests (or which module's deletion shifted the ratio).
-                Write-Host ("FAIL: coverage {0}% is below baseline {1}% (floor {2}%)." -f `
-                        $currentOverall, $baseOverall, $floor)
-                $regressed = @()
-                if ($baseline.perModule) {
-                    foreach ($name in $currentPerModule.Keys) {
-                        $bm = $baseline.perModule.$name
-                        if ($null -ne $bm -and $currentPerModule[$name] -lt ([double]$bm - $coverageTolerance)) {
-                            $regressed += '{0} {1}% -> {2}%' -f $name, ([double]$bm), $currentPerModule[$name]
-                        }
-                    }
-                }
-                if ($regressed.Count) {
-                    Write-Host '  regressed modules:'
-                    $regressed | ForEach-Object { Write-Host "    $_" }
-                }
-                else {
-                    Write-Host '  (no single module crossed the per-module tolerance; the overall ratio shifted -- e.g. new uncovered code or a covered module removed).'
-                }
+            # ---- Baseline sanity (tamper guard) -------------------------------------------------
+            # A baseline overall below the absolute floor cannot be real for this suite (~57%); it
+            # is almost certainly a baseline edited down to disarm the ratchet. Reject it outright
+            # so a gutted baseline fails LOUDLY instead of silently lowering the floor to nothing.
+            if ($baseOverall -lt $coverageAbsoluteFloor) {
+                Write-Host ("FAIL: baseline overall {0}% is below the absolute floor {1}% -- implausible for this suite; the baseline looks gutted or tampered. Restore coverage-baseline.json." -f `
+                        $baseOverall, $coverageAbsoluteFloor)
+                $failed = $true
+            }
+
+            # ---- Absolute floor on the MEASURED overall (baseline-independent) -------------------
+            # Independent of the baseline so that even a tampered/lowered baseline cannot let a
+            # genuinely collapsed suite pass. The real overall sits ~7pt above this.
+            if ($currentOverall -lt $coverageAbsoluteFloor) {
+                Write-Host ("FAIL: coverage {0}% is below the ABSOLUTE floor {1}% (baseline-independent hard minimum). The suite appears gutted." -f `
+                        $currentOverall, $coverageAbsoluteFloor)
+                $failed = $true
+            }
+
+            # ---- Overall ratchet (vs committed baseline) ----------------------------------------
+            $overallRegressed = $currentOverall -lt $floor
+            if ($overallRegressed) {
+                Write-Host ("FAIL: overall coverage {0}% is below baseline {1}% (floor {2}%, {3}pt tolerance)." -f `
+                        $currentOverall, $baseOverall, $floor, $coverageTolerance)
+                $failed = $true
+            }
+
+            # ---- Per-module ratchet (ALWAYS enforced, not just on an overall drop) ---------------
+            # For EVERY module recorded in the baseline, fail if its current hit-ratio fell more
+            # than the tolerance below its own baseline. Running this unconditionally is the whole
+            # point: it catches a single module shedding tests even while the overall holds.
+            $perModuleRegressed = @()
+            $perModuleOk = @()
+            $newModules = @()           # present on disk now but absent from the baseline
+            $missingModules = @()       # in the baseline but no longer produced any coverage
+
+            if (-not $baseline.perModule) {
+                # No per-module map at all -> cannot enforce floor #2. Treat as a baseline that must
+                # be regenerated rather than silently skipping half the gate.
+                Write-Host 'FAIL: coverage baseline has no perModule map; cannot enforce per-module floors. Regenerate coverage-baseline.json (see .github/CONTRIBUTING.md).'
                 $failed = $true
             }
             else {
-                Write-Host 'Coverage OK vs baseline.'
+                # Baseline-side member names (ConvertFrom-Json gives a PSCustomObject; enumerate its
+                # NoteProperty names) so we can detect baseline entries with no current coverage.
+                $baselineModuleNames = @($baseline.perModule.PSObject.Properties.Name)
+
+                # Enforce each baseline module's own floor; guard against a baseline module that no
+                # longer exists on disk (produced no commands this run) instead of comparing to nothing.
+                foreach ($name in $baselineModuleNames) {
+                    $bm = [double]$baseline.perModule.$name
+                    if (-not $currentPerModule.Contains($name)) {
+                        $missingModules += '{0} (baseline {1}%)' -f $name, $bm
+                        continue
+                    }
+                    $cur = [double]$currentPerModule[$name]
+                    $mFloor = [math]::Round($bm - $coverageTolerance, 2)
+                    if ($cur -lt $mFloor) {
+                        $perModuleRegressed += '{0} {1}% -> {2}% (floor {3}%)' -f $name, $bm, $cur, $mFloor
+                    }
+                    else {
+                        $perModuleOk += '{0} {1}%' -f $name, $cur
+                    }
+                }
+
+                # A module present now but ABSENT from the baseline is a new module that needs its
+                # own baseline entry -- don't null-deref it, and don't let it sneak in ungated. Warn
+                # loudly so its floor gets committed; the overall+absolute gates still cover the run.
+                foreach ($name in $currentPerModule.Keys) {
+                    if ($name -notin $baselineModuleNames) {
+                        $newModules += '{0} {1}%' -f $name, ([double]$currentPerModule[$name])
+                    }
+                }
+
+                if ($perModuleRegressed.Count) {
+                    Write-Host '  FAIL: per-module coverage regressed below baseline:'
+                    $perModuleRegressed | ForEach-Object { Write-Host "    $_" }
+                    $failed = $true
+                }
+                if ($missingModules.Count) {
+                    # A baseline module with no coverage this run: either it was deleted (update the
+                    # baseline) or its tests stopped running (a real regression). Fail so it's noticed.
+                    Write-Host '  FAIL: baseline modules produced no coverage this run (deleted, or their tests stopped running):'
+                    $missingModules | ForEach-Object { Write-Host "    $_" }
+                    Write-Host '    If a module was intentionally removed, drop its entry from coverage-baseline.json perModule.'
+                    $failed = $true
+                }
+                if ($newModules.Count) {
+                    Write-Host '  WARN: new module(s) not yet in the baseline perModule map -- add an entry to lock in their floor:'
+                    $newModules | ForEach-Object { Write-Host "    $_" }
+                }
+            }
+
+            # ---- Summary / ratchet hint ---------------------------------------------------------
+            if (-not $overallRegressed -and -not $perModuleRegressed.Count -and `
+                    -not $missingModules.Count -and $currentOverall -ge $coverageAbsoluteFloor -and `
+                    $baseOverall -ge $coverageAbsoluteFloor) {
+                Write-Host ("Coverage OK vs baseline: overall {0}% (floor {1}%) and all {2} baseline module(s) within tolerance." -f `
+                        $currentOverall, $floor, @($perModuleOk).Count)
                 if ($currentOverall -ge ($baseOverall + $ratchetHintMargin)) {
-                    # INCREASE beyond the margin: nudge -- but do NOT auto-raise. Raising the
-                    # baseline is a deliberate commit so the new floor is reviewed and intentional.
-                    Write-Host ("  ratchet: baseline can be raised to {0}% (currently {1}%). Update coverage-baseline.json in a commit to lock it in." -f `
+                    # INCREASE beyond the margin: nudge -- but do NOT auto-raise. Raising the baseline
+                    # is a deliberate commit so the new floor (overall AND perModule) is reviewed.
+                    Write-Host ("  ratchet: baseline can be raised to {0}% (currently {1}%). Update coverage-baseline.json -- BOTH overall and the relevant perModule entries -- in a commit to lock it in (see .github/CONTRIBUTING.md)." -f `
                             $currentOverall, $baseOverall)
                 }
             }
