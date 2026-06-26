@@ -12,11 +12,13 @@ BeforeDiscovery {
         ForEach-Object { @{ Path = $_.FullName; Name = $_.FullName.Replace($repoRoot, '').TrimStart('\', '/') } }
 }
 
+BeforeAll {
+    . "$PSScriptRoot/_ContractAst.ps1"   # memoized Get-ContractAst (caches AST + parse errors)
+}
+
 Describe 'Source files parse without errors' {
     It 'parses <Name> with no syntax errors' -ForEach $script:sourceFiles {
-        $tokens = $null
-        $errors = $null
-        [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors) | Out-Null
+        $errors = @((Get-ContractAst -Path $Path).Errors)
         $messages = ($errors | ForEach-Object { "L$($_.Extent.StartLineNumber): $($_.Message)" }) -join "`n"
         $errors.Count | Should -Be 0 -Because "the file must parse cleanly:`n$messages"
     }

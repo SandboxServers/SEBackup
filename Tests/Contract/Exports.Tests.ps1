@@ -8,7 +8,8 @@
 # This file also enforces the REVERSE direction and the wider export wiring (issue #21):
 #   - reverse-export: every root FunctionsToExport entry has a backing Public/*.ps1 file;
 #   - the root manifest's export set equals the union of every sub-module manifest's exports;
-#   - every module directory on disk is listed in the root SEBackup.psm1 $Modules array.
+#   - every module directory on disk (one carrying a matching <Name>.psd1/.psm1 -- see below) is
+#     listed in the root SEBackup.psm1 $Modules array.
 
 BeforeDiscovery {
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
@@ -18,6 +19,7 @@ BeforeDiscovery {
 }
 
 BeforeAll {
+    . "$PSScriptRoot/_ContractAst.ps1"   # memoized Get-ContractAst (shared parse cache)
     $repoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
 
     $manifest = Import-PowerShellDataFile -Path "$repoRoot/SEBackup.psd1"
@@ -39,8 +41,7 @@ BeforeAll {
     }
 
     # The $Modules array from the root SEBackup.psm1, read via AST (not by executing the module).
-    $tokens = $null; $errors = $null
-    $psm1Ast = [System.Management.Automation.Language.Parser]::ParseFile("$repoRoot/SEBackup.psm1", [ref]$tokens, [ref]$errors)
+    $psm1Ast = (Get-ContractAst -Path "$repoRoot/SEBackup.psm1").Ast
     $assign = @($psm1Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true) |
         Where-Object { $_.Left.Extent.Text -eq '$Modules' }) | Select-Object -First 1
     $script:listedModules = @()
@@ -48,7 +49,19 @@ BeforeAll {
         $script:listedModules = @($assign.Right.FindAll(
             { param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true).Value)
     }
-    $script:moduleDirs = @(Get-ChildItem -Path "$repoRoot/Modules" -Directory | Select-Object -ExpandProperty Name)
+
+    # A directory under Modules/ counts as a MODULE only if it carries a matching manifest/module
+    # file (<Name>.psd1 or <Name>.psm1), exactly as SEBackup.psm1 imports them
+    # (Modules\<Name>\<Name>.psm1). This deliberately IGNORES non-module directories that can appear
+    # under Modules/ -- e.g. the gitignored Modules/Credentials/ that the DPAPI credential resolver
+    # may create at runtime (.gitignore), or a leftover test fixture. Treating ANY subdirectory as a
+    # module made the "every module dir is listed" rule FAIL on such a stray dir and block every PR.
+    $script:moduleDirs = @(
+        Get-ChildItem -Path "$repoRoot/Modules" -Directory | Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_.FullName "$($_.Name).psd1")) -or
+            (Test-Path -LiteralPath (Join-Path $_.FullName "$($_.Name).psm1"))
+        } | Select-Object -ExpandProperty Name
+    )
 }
 
 Describe 'Root manifest exports every public sub-module function' {
