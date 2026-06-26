@@ -157,6 +157,27 @@ Describe 'Get-SEBHealthSummary' {
             finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
         }
     }
+
+    Context 'timezone-correct age (issue #62)' {
+        It 'computes the last-successful age from the UTC-stored timestamp regardless of host timezone' {
+            # The stored timestamp is UTC and the age is (UtcNow - storedUtc), so a backup written
+            # exactly 5h ago must report ~5h on ANY host. The bug re-Parsed the JSON-deserialized
+            # value to Kind=Unspecified and .ToUniversalTime() then assumed local, shifting the age
+            # by the host's UTC offset (e.g. ~9h on a UTC-4 host).
+            $root = New-TempRoot
+            try {
+                $now = [datetime]::UtcNow
+                $history = @(
+                    @{ timestamp = $now.AddHours(-5).ToString('o'); type = 'Full'; duration_seconds = 50; archive_size_bytes = 500; success = $true }
+                )
+                New-MetricsFile -BackupRoot $root -InstanceName 'TZ' -History $history | Out-Null
+                $s = Get-SEBHealthSummary -InstanceName 'TZ' -BackupRoot $root
+                $s.LastSuccessfulBackupAge.TotalHours | Should -BeGreaterThan 4.9
+                $s.LastSuccessfulBackupAge.TotalHours | Should -BeLessThan 5.1
+            }
+            finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
 Describe 'Add-SEBMetric / Get-SEBMetrics round trip' {

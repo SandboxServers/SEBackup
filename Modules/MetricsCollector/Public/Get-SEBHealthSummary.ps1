@@ -69,6 +69,22 @@ function Get-SEBHealthSummary {
 
     $now = [datetime]::UtcNow
 
+    # Interpret a stored metric timestamp as the UTC instant it was written as. Metrics store
+    # timestamps as UTC; ConvertFrom-Json hands them back as a [datetime] (Kind=Utc) or a raw
+    # string. Re-Parsing a [datetime] drops it to Kind=Unspecified, and .ToUniversalTime() then
+    # ASSUMES LOCAL and shifts the value by the host's UTC offset (issue #62). Force UTC in both
+    # cases so the computed age is correct regardless of host timezone.
+    $toUtc = {
+        param($ts)
+        if ($ts -is [datetime]) {
+            return [datetime]::SpecifyKind($ts, [System.DateTimeKind]::Utc)
+        }
+        return [datetime]::Parse(
+            [string]$ts,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    }
+
     # Default health summary
     $summary = [PSCustomObject]@{
         InstanceName                    = $InstanceName
@@ -93,7 +109,7 @@ function Get-SEBHealthSummary {
     if ($successfulEntries.Count -gt 0) {
         $lastSuccess = $successfulEntries[-1]
         try {
-            $lastSuccessTime = [datetime]::Parse($lastSuccess.timestamp).ToUniversalTime()
+            $lastSuccessTime = & $toUtc $lastSuccess.timestamp
             $age = $now - $lastSuccessTime
             $summary.LastSuccessfulBackupAge = $age
 
@@ -143,7 +159,7 @@ function Get-SEBHealthSummary {
     $sevenDaysAgo = $now.AddDays(-7)
     $recentWeek = @($history | Where-Object {
         try {
-            $ts = [datetime]::Parse($_.timestamp).ToUniversalTime()
+            $ts = & $toUtc $_.timestamp
             return $ts -ge $sevenDaysAgo
         }
         catch { return $false }

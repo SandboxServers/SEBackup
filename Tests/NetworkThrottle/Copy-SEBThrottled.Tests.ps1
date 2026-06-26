@@ -157,11 +157,11 @@ Describe 'Copy-SEBThrottled :: Strategy 2 (Robocopy /IPG throttling)' {
         ($script:roboArgs -join ' ') | Should -Match '/IPG:52'
     }
 
-    It 'silently ignores -Credential on the robocopy path (robocopy cannot accept a PSCredential)' {
-        # HONESTY GUARD: robocopy is a native exe invoked as `& robocopy @args`; the function never
-        # references $Credential on either robocopy branch. So a -Credential is DROPPED with no warning
-        # -- assert exactly that (no false impression the credential is honored): the copy still runs,
-        # no warning is emitted, and the credential never appears anywhere in the robocopy arg vector.
+    It 'warns that -Credential is ignored on the robocopy path (and never forwards it)' {
+        # robocopy is a native exe invoked as `& robocopy @args` and has no credential parameter,
+        # so a -Credential cannot be honored here (BITS and Copy-Item do honor it). The function
+        # must WARN rather than silently transfer as the calling identity (issue #61), and the
+        # credential must never appear anywhere in the robocopy arg vector.
         $script:roboArgs = $null
         Mock robocopy -ModuleName NetworkThrottle { $script:roboArgs = $args; $global:LASTEXITCODE = 0; '' }
         $sec = ConvertTo-SecureString 'p' -AsPlainText -Force
@@ -170,9 +170,10 @@ Describe 'Copy-SEBThrottled :: Strategy 2 (Robocopy /IPG throttling)' {
         $r = Copy-SEBThrottled -Source $script:srcDir -Destination $script:dstDir -MaxBandwidthMbps 10 `
             -Credential $cred -WarningVariable warnings -WarningAction SilentlyContinue
         $r.Method | Should -Be 'Robocopy'
-        $warnings | Should -BeNullOrEmpty                                  # not warned: silently ignored
-        # Pester's -Match is case-insensitive; the credential (username or the literal '/credential'
-        # switch robocopy has no concept of) must appear nowhere in the arg vector.
+        ($warnings -join ' ') | Should -Match 'Credential'                 # warned: not silently dropped
+        ($warnings -join ' ') | Should -Match 'ignored'
+        # Pester's -Match is case-insensitive; the credential (username or any '/credential' switch
+        # robocopy has no concept of) must appear nowhere in the arg vector.
         ($script:roboArgs -join ' ') | Should -Not -Match 'robo-user'     # credential never forwarded
         ($script:roboArgs -join ' ') | Should -Not -Match 'credential'
     }
